@@ -124,22 +124,46 @@ Two other notes on `geo browse`:
 
 ## 3. Decide whether to spend — the three-state availability signal
 
-Every geography row carries `prices_available` and `current_period`. Together they are **three**
-answers, not two:
+Every geography row carries `prices_available` and `has_data` (servers older than 2026-09-20 send
+`current_period`, a date, instead — the CLI reads either and prints the same lines). Together they
+are **three** answers, not two:
 
 | what the row says | what it means | what to do |
 |---|---|---|
-| `prices, current period 2026-08-01 — ask stats current` | there are figures for the newest built window | spend one `stats current` |
-| `prices, but nothing in the current period — try stats history, not a dead end` | **NOT "no data"** — nothing met the display floor in the CURRENT window only | try `stats history` |
+| `prices, data in the current period — ask stats current` | there are figures for the newest built period | spend one `stats current` |
+| `prices, but nothing in the current period — try stats history, not a dead end` | **NOT "no data"** — too little in the CURRENT period only | try `stats history` |
 | `no prices — dead end, do not spend a metered call` | nothing is held for this place | stop; pick another place |
 
-**The middle state is the one that gets misread.** A null current period is not an empty market.
-Live example: Montenegro (`me`) shows no current period, `stats current --geo-id me` returns zero
-rows — and `stats history --geo-id me` returns real figures, $3,271/m² median for 2025-09. Treating
-that place as dead would have thrown away the answer.
+On an older server the first line names the period instead:
+`prices, current period 2026-08-01 — ask stats current`. It means the same thing.
+
+**The middle state is the one that gets misread.** "Nothing in the current period" is not an empty
+market. Live example: Montenegro (`me`) had nothing in the current period, `stats current --geo-id me`
+returned zero rows — and `stats history --geo-id me` returned real figures, $3,271/m² median for
+2025-09. Treating that place as dead would have thrown away the answer.
+
+⚠️ **The signal is necessary, never sufficient.** It is measured over the whole place, across every
+`ad_type`, before your filters apply. "Data in the current period" with a narrow `--rooms` or price
+band can still come back with zero rows — and the API calls "nothing this period" *conservative*,
+not proof. Treat the first line as "worth asking" and the middle one as "probably not".
 
 `stats current` on a covered place holding nothing is a **normal answer with zero rows, exit 0** —
 not an error, and not a price of zero. Never report it as "the price is 0".
+
+**An empty answer says why.** The CLI prints a `Why:` line with the API's own reason, and — when
+the API names them — the periods that DO hold data for your segment. Act on the reason:
+
+| `Why:` reason | what to do |
+|---|---|
+| `no_data_for_selection` | your filters matched nothing — widen them |
+| `below_minimum_sample` | too few listings to publish a figure — try `stats history`, or a wider area |
+| `period_not_built` | the newest period is not built yet — ask again after the next build, or use `stats history` |
+| `no_data_for_place` | we hold nothing here for this segment — pick another place or segment |
+| `not_determined` | the API could not tell — treat it like `below_minimum_sample` |
+
+If the `Why:` block names a range (`This segment has data from … to …`), ask `stats history` inside
+that range: that call can succeed. The reason describes **our aggregate**, never the market — never
+tell a user "nothing was for sale".
 
 ## 4. Spend one metered call, then cite it
 
@@ -247,13 +271,13 @@ Same-named places are told apart by the chain under each hit, never by the name.
 1. Russafa — microzone, es
    geo_id: R14727511
    in:     l'Eixample (macrozone, R4231821) › València (city, R344953) › València / Valencia (province, R349000) › Comunitat Valenciana (region, R349043) › ES (country, es)
-   prices, current period 2026-08-01 — ask stats current
+   prices, data in the current period — ask stats current
 
 cost: FREE — group metadata, uncounted · 1 request
 ```
 
-One hit, the chain confirms it is the Valencia one, and the availability line says figures exist for
-2026-08-01. Now spend the one metered call:
+One hit, the chain confirms it is the Valencia one, and the availability line says the newest
+period holds figures. Now spend the one metered call:
 
 ```
 $ investviews stats current --geo-id R14727511

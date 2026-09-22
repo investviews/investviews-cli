@@ -337,9 +337,19 @@ func renderCurrent(w io.Writer, resp *api.CurrentStats, params api.StatsParams) 
 //     answer carried no geo_id, which is every --h3 and every circle request.
 //     A bare `stats history` names no territory and is refused locally.
 func renderEmptyStats(w io.Writer, resp *api.CurrentStats, params api.StatsParams) {
-	fmt.Fprintf(w, "No figures for this territory in period %s. That is a NORMAL answer, not an\n", str(resp.Period))
-	fmt.Fprintln(w, "error and not a zero: the territory is covered, and it held nothing that met the")
-	fmt.Fprintln(w, "display floor in this window.")
+	if resp.Availability != nil {
+		// The API says WHY, from a closed vocabulary — print its answer
+		// rather than guessing one. The old guess ("it held nothing that met
+		// the display floor") is wrong for two of the five reasons: an
+		// unbuilt period, and filters that matched nothing.
+		fmt.Fprintf(w, "No figures for this selection in period %s. That is a NORMAL answer, not an\n", str(resp.Period))
+		fmt.Fprintln(w, "error and not a zero.")
+		renderWhy(w, resp.Availability)
+	} else {
+		fmt.Fprintf(w, "No figures for this territory in period %s. That is a NORMAL answer, not an\n", str(resp.Period))
+		fmt.Fprintln(w, "error and not a zero: the territory is covered, and it held nothing that met the")
+		fmt.Fprintln(w, "display floor in this window.")
+	}
 	if resp.Snapshot.EarliestPeriod != "" {
 		fmt.Fprintf(w, "History goes back to %s.\n", resp.Snapshot.EarliestPeriod)
 	}
@@ -353,6 +363,34 @@ func renderEmptyStats(w io.Writer, resp *api.CurrentStats, params api.StatsParam
 	}
 	moves = append(moves, "a wider filter set")
 	fmt.Fprintf(w, "Next: %s.\n", strings.Join(moves, ", or "))
+}
+
+// anyRows reports whether any period of a series carries a figure.
+func anyRows(series []api.HistoryPoint) bool {
+	for _, point := range series {
+		if len(point.Stats) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// renderWhy prints the API's own reason for an empty answer, and the periods
+// that DO hold data for this segment when the API names them. Those dates are
+// the actionable half: they turn "empty" into a call that can succeed.
+func renderWhy(w io.Writer, a *api.Availability) {
+	fmt.Fprintf(w, "Why: %s", a.ReasonOrUnknown())
+	if a.Message != "" {
+		fmt.Fprintf(w, " — %s", a.Message)
+	}
+	fmt.Fprintln(w)
+	if a.EarliestNonemptyPeriod != nil || a.LatestNonemptyPeriod != nil {
+		fmt.Fprintf(w, "This segment has data from %s to %s", str(a.EarliestNonemptyPeriod), str(a.LatestNonemptyPeriod))
+		if a.SearchedFrom != nil {
+			fmt.Fprintf(w, " (searched back to %s)", *a.SearchedFrom)
+		}
+		fmt.Fprintln(w, ".")
+	}
 }
 
 // maxHintCells is how many cell ids a hint will spell out before naming them
@@ -558,6 +596,9 @@ func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 
 	if len(resp.Series) == 0 {
 		fmt.Fprintln(w, "No periods in this range. That is a NORMAL answer, not an error.")
+		if resp.Availability != nil {
+			renderWhy(w, resp.Availability)
+		}
 		if resp.Snapshot.EarliestPeriod != "" {
 			fmt.Fprintf(w, "History goes back to %s — widen --from, or drop it for the last 12 periods.\n",
 				resp.Snapshot.EarliestPeriod)
@@ -603,6 +644,12 @@ func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "A period here holds several cells, so there is no single figure per period.")
 		fmt.Fprintln(w, "Use --json for the per-cell figures, or ask about one cell at a time.")
+	}
+	// A series whose every period came back empty is a row of dashes; the
+	// reason is the only line in it an agent can act on.
+	if resp.Availability != nil && !anyRows(resp.Series) {
+		fmt.Fprintln(w)
+		renderWhy(w, resp.Availability)
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "⚠️ POINTS ARE NOT ADDITIVE — compare them, never sum them.")

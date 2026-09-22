@@ -177,6 +177,61 @@ func TestStatsCurrentEmptyIsANormalAnswer(t *testing.T) {
 	contains(t, res.stdout, "Next: investviews stats history --geo-id jp")
 }
 
+// ⚠️ Since 2026-09-20 the API says WHY an answer is empty. The CLI must print
+// the API's reason — not its own old guess, which blamed the display floor
+// even when the filters matched nothing or the period was not built yet — and
+// the periods that DO hold data, which are the move that can succeed.
+func TestStatsCurrentEmptyPrintsTheAPIsReasonAndTheDates(t *testing.T) {
+	body := `{"as_of":"2026-08-31","currency":"USD","period":"2026-08-01","granularity":"month",
+	 "window_start":"2026-08-01","window_end":"2026-08-31","fx_date":"2026-08-15",
+	 "territory":{"selector":"geo_id","hex_count":0,"geo_id":"R344953","grain":"geo"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":["5+"],
+	   "units":{"size":"m2","price":"USD"},"note":""},
+	 "snapshot":{"as_of":"2026-08-01","built":"2026-09-05","earliest_period":"2024-03-01"},
+	 "stats":[],
+	 "availability":{"status":"no_data","reason":"no_data_for_selection",
+	   "message":"This place holds data, but none matched your filters.",
+	   "searched_from":"2025-09-01","earliest_nonempty_period":"2025-11-01",
+	   "latest_nonempty_period":"2026-07-01",
+	   "segment":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":["5+"]},"note":""}}`
+
+	res := run(t, meteredJSON(body), "stats", "current", "--geo-id", "R344953")
+	if res.err != nil {
+		t.Fatalf("an empty answer must not be an error, got: %v", res.err)
+	}
+	contains(t, res.stdout, "Why: no_data_for_selection — This place holds data, but none matched your filters.")
+	contains(t, res.stdout, "This segment has data from 2025-11-01 to 2026-07-01 (searched back to 2025-09-01).")
+	if strings.Contains(res.stdout, "held nothing that met the") {
+		t.Errorf("the old display-floor guess must not be printed beside the API's own reason:\n%s", res.stdout)
+	}
+}
+
+// A history series whose every period is empty is a table of dashes; the
+// reason is the only line in it an agent can act on.
+func TestStatsHistoryAllEmptyPrintsTheReason(t *testing.T) {
+	body := `{"currency":"USD","territory":{"selector":"geo_id","hex_count":0,"geo_id":"me"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":[],
+	   "units":{"size":"m2","price":"USD"},"note":""},
+	 "series":[{"period":"2026-07-01","granularity":"month","window_start":"2026-07-01",
+	   "window_end":"2026-07-31","as_of":"2026-07-31","fx_date":"2026-07-15","stats":[],
+	   "availability":{"status":"no_data","reason":"below_minimum_sample","message":"m"}}],
+	 "series_note":"",
+	 "snapshot":{"as_of":null,"built":"","earliest_period":"2024-03-01"},
+	 "availability":{"status":"no_data","reason":"below_minimum_sample",
+	   "message":"Too few listings in this window to publish a figure.",
+	   "searched_from":"2026-07-01","earliest_nonempty_period":null,"latest_nonempty_period":null,
+	   "segment":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":null},"note":""}}`
+
+	res := run(t, meteredJSON(body), "stats", "history", "--geo-id", "me")
+	if res.err != nil {
+		t.Fatalf("history: %v", res.err)
+	}
+	contains(t, res.stdout, "Why: below_minimum_sample — Too few listings in this window to publish a figure.")
+	if strings.Contains(res.stdout, "This segment has data from") {
+		t.Errorf("no date was named, so no range may be printed:\n%s", res.stdout)
+	}
+}
+
 // ⚠️ ABSENT IS NOT FALSE. An unstamped low_confidence says nothing either way,
 // so it must never render as a clean bill of health.
 func TestStatsCurrentDoesNotReadAnAbsentLowConfidenceAsConfident(t *testing.T) {
