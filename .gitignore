@@ -6,3 +6,6 @@
 # revmux review archive — agent transcripts, megabytes per round.
 # The project profile (.revmux/profile.md) IS tracked; the rounds are not.
 .revmux/tasks/
+
+# git worktrees — always created at .claude/worktrees/<name>
+.claude/worktrees/
