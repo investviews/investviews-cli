@@ -39,6 +39,46 @@ func TestBrowseRootPrintsSpendableIDsAndTheThreeStateSignal(t *testing.T) {
 	}
 }
 
+// ⚠️ THE API REPLACED current_period WITH has_data ON 2026-09-20. Against the
+// new API the CLI read an absent current_period and printed "this endpoint
+// does not publish a current period" on EVERY row — the skill's whole
+// ask/try-history/stop signal gone, with no error to notice. The same three
+// answers must come back from has_data.
+const countriesHasDataBody = `{"results":[
+  {"kind":"country","geo_id":"es","name":"ES","level":"country","country":"es",
+   "ancestors":[],"prices_available":true,"has_data":true},
+  {"kind":"country","geo_id":"me","name":"ME","level":"country","country":"me",
+   "ancestors":[],"prices_available":true,"has_data":false},
+  {"kind":"country","geo_id":"zz","name":"ZZ","level":"country","country":"zz",
+   "ancestors":[],"prices_available":false,"has_data":false}]}`
+
+func TestBrowseReadsHasDataAsTheThreeStateSignal(t *testing.T) {
+	res := run(t, freeJSON(countriesHasDataBody), "geo", "browse")
+	if res.err != nil {
+		t.Fatalf("browse: %v", res.err)
+	}
+	contains(t, res.stdout, "prices, data in the current period — ask stats current")
+	contains(t, res.stdout, "prices, but nothing in the current period — try stats history, not a dead end")
+	contains(t, res.stdout, "no prices — dead end, do not spend a metered call")
+	if strings.Contains(res.stdout, "does not publish a current period") {
+		t.Errorf("has_data was published, so the signal must not read as missing:\n%s", res.stdout)
+	}
+}
+
+// --json must carry has_data through and must not invent a current_period the
+// server never sent.
+func TestBrowseJSONCarriesHasData(t *testing.T) {
+	res := run(t, freeJSON(countriesHasDataBody), "geo", "browse", "--json")
+	if res.err != nil {
+		t.Fatalf("browse --json: %v", res.err)
+	}
+	contains(t, res.stdout, `"has_data": true`)
+	contains(t, res.stdout, `"has_data": false`)
+	if strings.Contains(res.stdout, "current_period") {
+		t.Errorf("--json invented current_period:\n%s", res.stdout)
+	}
+}
+
 // ⚠️ THE CENTRAL TEST FOR --level's TWO MEANINGS. Under a country the flag is
 // a whole-level jump; under a place it filters direct children. The header
 // line must say which one happened, or the output of the two is
@@ -296,6 +336,27 @@ func TestLookupKeepsUnknownAncestryApartFromRoot(t *testing.T) {
 	if res.lastQuery() != "h3=613498079267520511" {
 		t.Errorf("query = %q", res.lastQuery())
 	}
+}
+
+// The zones on a lookup carry the same signal. The column reads it from
+// whichever contract answered.
+func TestLookupZonesReadHasData(t *testing.T) {
+	body := `{"kind":"point","lat":39.4699,"lng":-0.3763,"h3":"613498079267520511","h3_res":8,
+	 "source":"h3_zone","country":"es","display_name":"València, Spain","prices_available":true,
+	 "reports_available":true,
+	 "zones":[
+	   {"level":"microzone","name":"Russafa","geo_id":"R4231821","ancestors":[],
+	    "has_data":false,"hexes_url":null},
+	   {"level":"city","name":"València","geo_id":"R344953","ancestors":[],
+	    "has_data":true,"hexes_url":null}]}`
+
+	res := run(t, freeJSON(body), "geo", "lookup", "--h3", "613498079267520511")
+	if res.err != nil {
+		t.Fatalf("lookup: %v", res.err)
+	}
+	contains(t, res.stdout, "DATA THIS PERIOD")
+	contains(t, res.stdout, "no — try history")
+	contains(t, res.stdout, "yes")
 }
 
 func TestLookupRefusesBothSelectorsBeforeSendingAnything(t *testing.T) {

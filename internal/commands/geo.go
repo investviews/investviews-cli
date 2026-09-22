@@ -165,7 +165,7 @@ func renderBrowse(w io.Writer, parentFlag, level string, resp *api.GeoResponse) 
 		fmt.Fprintln(tw, "GEO_ID\tLEVEL\tNAME\tAVAILABILITY")
 		for _, row := range resp.Results {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-				row.GeoID, dash(row.Level), row.Name, availability(row.PricesAvailable, row.CurrentPeriod))
+				row.GeoID, dash(row.Level), row.Name, availability(row.PricesAvailable, row.HasData, row.CurrentPeriod))
 		}
 	})
 }
@@ -334,7 +334,7 @@ func renderSearch(w io.Writer, query string, resp *api.SearchResponse) {
 			fmt.Fprintf(w, "   point:  %s, %s (geocoder fallback, source %s)\n",
 				num(hit.Lat), num(hit.Lng), dash(hit.Source))
 		}
-		fmt.Fprintf(w, "   %s\n", availability(hit.PricesAvailable, hit.CurrentPeriod))
+		fmt.Fprintf(w, "   %s\n", availability(hit.PricesAvailable, hit.HasData, hit.CurrentPeriod))
 	}
 }
 
@@ -442,14 +442,14 @@ func renderPoint(w io.Writer, point *api.Point) {
 	}
 	fmt.Fprintln(w, "Containing zones, fine to coarse:")
 	table(w, func(tw io.Writer) {
-		fmt.Fprintln(tw, "LEVEL\tNAME\tGEO_ID\tCURRENT PERIOD\tANCESTRY")
+		fmt.Fprintln(tw, "LEVEL\tNAME\tGEO_ID\tDATA THIS PERIOD\tANCESTRY")
 		for _, zone := range point.Zones {
 			geoID := "—"
 			if zone.Addressable() {
 				geoID = *zone.GeoID
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				dash(zone.Level), zone.Name, geoID, dash(zone.CurrentPeriod.String()), ancestry(zone.Ancestors))
+				dash(zone.Level), zone.Name, geoID, dataNow(zone.HasData, zone.CurrentPeriod), ancestry(zone.Ancestors))
 		}
 	})
 }
@@ -638,7 +638,7 @@ func renderHexes(w io.Writer, page *api.HexPage, complete bool) {
 	}
 	fmt.Fprintf(w, "%s %s (%s, %s) — %d cell(s) at res %d, %s\n",
 		dash(page.GeoID), page.Name, dash(page.Level), dash(page.Country), len(page.Hexes), page.H3Res, scope)
-	fmt.Fprintf(w, "%s\n", availability(page.PricesAvailable, api.NullableDate{}))
+	fmt.Fprintf(w, "%s\n", availability(page.PricesAvailable, nil, api.NullableDate{}))
 	fmt.Fprintln(w)
 
 	if len(page.Hexes) == 0 {

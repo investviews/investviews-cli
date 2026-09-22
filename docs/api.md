@@ -176,10 +176,23 @@ changed".
 - **A skipped level returns an empty list, with `parent` still present.**
   `GET /geo?parent=<city>&level=microzone` is 200 with `"results": []`, because a city's direct
   children are macrozones. Levels are skipped, not shifted.
-- **`current_period: null` alongside `prices_available: true`** means nothing met the display floor
-  in the *current* window. `/stats/history` may still answer. Live on 2026-09-12: Montenegro (`me`)
-  had a null current period, an empty `/stats/current`, and real figures in `/stats/history` for
-  2025-09 and 2025-10.
+- **`has_data: false` alongside `prices_available: true`** means too little in the *current*
+  period. `/stats/history` may still answer. Live on 2026-09-12: Montenegro (`me`) had nothing in
+  the current period, an empty `/stats/current`, and real figures in `/stats/history` for 2025-09
+  and 2025-10.
+  - ⚠️ **`has_data` replaced `current_period` on 2026-09-20.** The old field was a date — the
+    period `/stats/current` would read — with `null` meaning the same as `has_data: false`. It was
+    removed because `/stats` now picks the window per answer, from what the place holds *for the
+    selection that asked*, so no single date on a `/geo` row could be promised. The CLI reads
+    either field, so it works against a server on either side of the change.
+  - `has_data` is **necessary, never sufficient**: it is measured over the whole place before your
+    filters, and the API calls `false` conservative rather than authoritative.
+- **An empty `/stats` answer carries `availability`** (since 2026-09-20): `status`, a `reason` from
+  a closed vocabulary (`period_not_built`, `no_data_for_place`, `below_minimum_sample`,
+  `no_data_for_selection`, `not_determined`), a `message`, and the earliest and latest periods that
+  do hold data for the segment. `/stats/history` carries it on the envelope and a verdict on every
+  point. `reason` is `null` exactly when `status` is `ok`. Treat an unknown reason as
+  `not_determined`.
 - **`ancestors` is `[]`, not `null`, at the root** — every country row carries an empty array. The
   schema permits `null` and the CLI models it, but a live sweep of 300 points across 12 countries
   never produced one.

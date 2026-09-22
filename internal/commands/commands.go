@@ -192,26 +192,51 @@ func table(w io.Writer, write func(io.Writer)) {
 // the three-state availability signal
 // ─────────────────────────────────────────────────────────────────────────────
 
-// availability renders prices_available and current_period TOGETHER, because
+// availability renders prices_available and the data signal TOGETHER, because
 // separately they are two booleans and together they are three answers:
 //
-//	true  + a date — the window /stats/current would answer this place from.
-//	true  + null   — too thin THIS period. NOT "no data": /stats/history may
+//	true  + data   — /stats/current will answer this place.
+//	true  + none   — too thin THIS period. NOT "no data": /stats/history may
 //	                 still answer for older windows, and an agent that reads
 //	                 this as a dead end abandons a live place.
-//	false + null   — a dead end. Do not spend a metered call.
-func availability(pricesAvailable bool, period api.NullableDate) string {
-	switch {
-	case !pricesAvailable:
+//	false + none   — a dead end. Do not spend a metered call.
+//
+// The data signal is has_data on the current API and current_period on one
+// older than 2026-09-20 (see api.DataThisPeriod). The words are the same for
+// both, so the skill's table does not depend on which server answered — only
+// the old API names the period, and then the line names it too.
+func availability(pricesAvailable bool, hasData *bool, period api.NullableDate) string {
+	if !pricesAvailable {
 		return "no prices — dead end, do not spend a metered call"
-	case period.Valid():
-		return "prices, current period " + period.Value() + " — ask stats current"
-	case period.IsNull():
+	}
+	switch api.DataThisPeriod(hasData, period) {
+	case api.DataYes:
+		if hasData == nil {
+			return "prices, current period " + period.Value() + " — ask stats current"
+		}
+		return "prices, data in the current period — ask stats current"
+	case api.DataNo:
 		return "prices, but nothing in the current period — try stats history, not a dead end"
 	default:
-		// The key was absent. This endpoint does not publish it, which says
-		// nothing about the place either way.
+		// Neither key was sent. This endpoint does not publish the signal,
+		// which says nothing about the place either way.
 		return "prices — this endpoint does not publish a current period"
+	}
+}
+
+// dataNow is the one-word column form of the same signal, for tables where a
+// sentence per row would not fit.
+func dataNow(hasData *bool, period api.NullableDate) string {
+	switch api.DataThisPeriod(hasData, period) {
+	case api.DataYes:
+		if hasData == nil {
+			return period.Value()
+		}
+		return "yes"
+	case api.DataNo:
+		return "no — try history"
+	default:
+		return "—"
 	}
 }
 

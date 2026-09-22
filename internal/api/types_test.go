@@ -235,11 +235,134 @@ func TestQueryableReadsPricesAvailableBesideCurrentPeriod(t *testing.T) {
 		{"prices and a window", GeoResult{PricesAvailable: true, CurrentPeriod: Date("2026-08-01")}, true},
 		{"prices, nothing this period", GeoResult{PricesAvailable: true, CurrentPeriod: NullDate()}, false},
 		{"dead end", GeoResult{PricesAvailable: false, CurrentPeriod: NullDate()}, false},
+		{"has_data true", GeoResult{PricesAvailable: true, HasData: boolPtr(true)}, true},
+		{"has_data false", GeoResult{PricesAvailable: true, HasData: boolPtr(false)}, false},
+		{"has_data true but no prices", GeoResult{PricesAvailable: false, HasData: boolPtr(true)}, false},
+		{"has_data wins over a stale date", GeoResult{PricesAvailable: true, HasData: boolPtr(false), CurrentPeriod: Date("2026-08-01")}, false},
+		{"neither published", GeoResult{PricesAvailable: true}, false},
 	}
 	for _, tc := range cases {
 		if got := tc.row.Queryable(); got != tc.query {
 			t.Errorf("%s: Queryable = %v, want %v", tc.name, got, tc.query)
 		}
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// --json re-encodes these structs, so what they DROP or INVENT is what an
+// agent reading --json sees. Both contracts must round-trip faithfully.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// reencode decodes a body into T and encodes it back — exactly the path
+// `--json` takes.
+func reencode[T any](t *testing.T, body string) string {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal([]byte(body), &v); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	return string(out)
+}
+
+// ⚠️ THE BUG THIS PINS: a current API sends has_data and NO current_period. A
+// NullableDate re-encodes its absent state as `null`, so --json used to print
+// `"current_period":null` on every row — "nothing this period", everywhere,
+// about places the server said HAD data — while dropping has_data outright.
+func TestJSONKeepsHasDataAndInventsNoCurrentPeriod(t *testing.T) {
+	body := `{"results":[
+	  {"kind":"country","geo_id":"es","name":"ES","level":"country","country":"es",
+	   "ancestors":[],"prices_available":true,"has_data":true},
+	  {"kind":"country","geo_id":"me","name":"ME","level":"country","country":"me",
+	   "ancestors":[],"prices_available":true,"has_data":false}]}`
+	out := reencode[GeoResponse](t, body)
+
+	if strings.Contains(out, "current_period") {
+		t.Errorf("--json invented current_period, which the server never sent:\n%s", out)
+	}
+	if !strings.Contains(out, `"has_data":true`) || !strings.Contains(out, `"has_data":false`) {
+		t.Errorf("--json dropped has_data:\n%s", out)
+	}
+}
+
+// The old contract must still round-trip unchanged — this CLI reaches servers
+// that have not been upgraded — with its three states intact.
+func TestJSONKeepsTheOldCurrentPeriodStates(t *testing.T) {
+	body := `{"results":[
+	  {"kind":"country","geo_id":"es","name":"ES","level":"country","country":"es",
+	   "ancestors":[],"prices_available":true,"current_period":"2026-08-01"},
+	  {"kind":"country","geo_id":"me","name":"ME","level":"country","country":"me",
+	   "ancestors":[],"prices_available":true,"current_period":null}]}`
+	out := reencode[GeoResponse](t, body)
+
+	if !strings.Contains(out, `"current_period":"2026-08-01"`) || !strings.Contains(out, `"current_period":null`) {
+		t.Errorf("--json lost a current_period state:\n%s", out)
+	}
+	if strings.Contains(out, "has_data") {
+		t.Errorf("--json invented has_data, which this server never sent:\n%s", out)
+	}
+}
+
+// The zones on a /geo/lookup point carry the same signal, and the same bug.
+func TestJSONZoneSummaryKeepsHasData(t *testing.T) {
+	out := reencode[ZoneSummary](t, `{"level":"city","name":"València","geo_id":"R344953",
+	  "ancestors":[],"has_data":true,"hexes_url":null}`)
+	if strings.Contains(out, "current_period") || !strings.Contains(out, `"has_data":true`) {
+		t.Errorf("zone re-encoded wrongly:\n%s", out)
+	}
+}
+
+// availability is how the API says WHY stats is empty. Dropping it from --json
+// leaves an agent with an empty array and no way to tell "wait for the build"
+// from "broaden your filters". reason must stay a literal null on "ok".
+func TestJSONKeepsAvailability(t *testing.T) {
+	empty := reencode[CurrentStats](t, `{"stats":[],"availability":{
+	  "status":"no_data","reason":"no_data_for_selection","message":"Your filters matched nothing.",
+	  "searched_from":"2025-09-01","earliest_nonempty_period":"2025-10-01","latest_nonempty_period":"2026-08-01",
+	  "segment":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":null},"note":"n"}}`)
+	for _, want := range []string{
+		`"reason":"no_data_for_selection"`, `"earliest_nonempty_period":"2025-10-01"`,
+		`"latest_nonempty_period":"2026-08-01"`, `"searched_from":"2025-09-01"`, `"rooms":null`,
+	} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("--json dropped %s:\n%s", want, empty)
+		}
+	}
+
+	ok := reencode[CurrentStats](t, `{"stats":[],"availability":{"status":"ok","reason":null,"message":"",
+	  "searched_from":null,"earliest_nonempty_period":"2026-08-01","latest_nonempty_period":"2026-08-01",
+	  "segment":{"ad_type":"a","ad_sub_type":"b","rooms":null},"note":""}}`)
+	if !strings.Contains(ok, `"reason":null`) {
+		t.Errorf("reason must stay a literal null on ok:\n%s", ok)
+	}
+
+	// An old server sends no availability — the key must not appear.
+	if old := reencode[CurrentStats](t, `{"stats":[]}`); strings.Contains(old, "availability") {
+		t.Errorf("--json invented availability for a server that never sent it:\n%s", old)
+	}
+
+	history := reencode[HistoryResponse](t, `{"series":[{"period":"2026-08-01","stats":[],
+	  "availability":{"status":"no_data","reason":"below_minimum_sample","message":"m"}}],
+	  "availability":{"status":"no_data","reason":"below_minimum_sample","message":"m",
+	  "searched_from":"2025-09-01","earliest_nonempty_period":null,"latest_nonempty_period":null,
+	  "segment":{"ad_type":"a","ad_sub_type":"b","rooms":null},"note":""}}`)
+	if strings.Count(history, `"reason":"below_minimum_sample"`) != 2 {
+		t.Errorf("history must keep both the envelope and the per-point verdict:\n%s", history)
+	}
+}
+
+func TestReasonOrUnknownReadsAMissingReasonAsNotDetermined(t *testing.T) {
+	if got := (AvailabilityVerdict{}).ReasonOrUnknown(); got != "not_determined" {
+		t.Errorf("got %q", got)
+	}
+	r := "period_not_built"
+	if got := (AvailabilityVerdict{Reason: &r}).ReasonOrUnknown(); got != r {
+		t.Errorf("got %q", got)
 	}
 }
 

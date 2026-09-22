@@ -97,9 +97,9 @@ func TestACommandWithoutACredentialRefusesBeforeAnyRequest(t *testing.T) {
 }
 
 func TestAvailabilityIsThreeAnswersNotTwo(t *testing.T) {
-	ask := availability(true, api.Date("2026-08-01"))
-	thin := availability(true, api.NullDate())
-	dead := availability(false, api.NullDate())
+	ask := availability(true, nil, api.Date("2026-08-01"))
+	thin := availability(true, nil, api.NullDate())
+	dead := availability(false, nil, api.NullDate())
 
 	if ask == thin || thin == dead || ask == dead {
 		t.Fatalf("the three states must read differently:\n%q\n%q\n%q", ask, thin, dead)
@@ -107,6 +107,34 @@ func TestAvailabilityIsThreeAnswersNotTwo(t *testing.T) {
 	contains(t, thin, "stats history")
 	contains(t, thin, "not a dead end")
 	contains(t, dead, "do not spend a metered call")
+}
+
+// ⚠️ has_data REPLACED current_period on 2026-09-20, and the skill's decision
+// table is written against these exact lines. The new signal must land on the
+// SAME three answers as the old one — otherwise the table silently stops
+// matching whichever server version an agent happens to reach.
+func TestAvailabilityReadsHasDataAsTheSameThreeAnswers(t *testing.T) {
+	yes, no := true, false
+
+	ask := availability(true, &yes, api.NullableDate{})
+	thin := availability(true, &no, api.NullableDate{})
+	dead := availability(false, &no, api.NullableDate{})
+
+	contains(t, ask, "ask stats current")
+	if thin != availability(true, nil, api.NullDate()) {
+		t.Errorf("has_data false must read exactly like a null current_period:\n%q", thin)
+	}
+	if dead != availability(false, nil, api.NullDate()) {
+		t.Errorf("a dead end must read the same on both contracts:\n%q", dead)
+	}
+	// has_data carries no date, so the line must not pretend it knows one.
+	if strings.Contains(ask, "current period 20") {
+		t.Errorf("has_data names no period, but the line did: %q", ask)
+	}
+	// And the new signal wins when a server sends both.
+	if got := availability(true, &no, api.Date("2026-08-01")); got != thin {
+		t.Errorf("has_data must win over current_period; got %q", got)
+	}
 }
 
 // ⚠️ null ancestry and empty ancestry are different answers. Unknown means

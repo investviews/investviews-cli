@@ -120,6 +120,13 @@ func (a Ancestors) MarshalJSON() ([]byte, error) {
 //	                /stats/history may still answer for older windows.
 //	!Set          — the endpoint does not publish the field at all (a hex
 //	                page, for one). Says nothing about the place.
+//
+// ⚠️ current_period is the API's OLD signal. Since 2026-09-20 the API sends
+// has_data instead (see GeoResult.HasData), and the field is kept here only so
+// this CLI still reads a server that has not been upgraded yet. A field tagged
+// with it must carry `omitzero`: --json re-encodes these structs, and without
+// it an ABSENT current_period comes back out as `null` — which reads as
+// "nothing this period" on every row of a server that never said so.
 type NullableDate struct {
 	set   bool
 	valid bool
@@ -143,6 +150,10 @@ func (d NullableDate) IsNull() bool { return d.set && !d.valid }
 
 // Value is the date, empty unless Valid.
 func (d NullableDate) Value() string { return d.value }
+
+// IsZero reports the absent state. encoding/json's `omitzero` reads it, which
+// is what keeps an absent key absent when a response is re-encoded for --json.
+func (d NullableDate) IsZero() bool { return !d.set }
 
 func (d NullableDate) String() string {
 	switch {
@@ -194,8 +205,13 @@ type GeoResult struct {
 	H3Res    *int   `json:"h3_res,omitempty"`
 	HexesURL string `json:"hexes_url,omitempty"`
 
-	PricesAvailable  bool         `json:"prices_available"`
-	CurrentPeriod    NullableDate `json:"current_period"`
+	PricesAvailable bool `json:"prices_available"`
+	// HasData is the API's current signal: does this place hold enough for
+	// /stats/current to answer in the newest built period. nil means the
+	// server did not send it — a server older than 2026-09-20, which sends
+	// CurrentPeriod instead. See DataThisPeriod.
+	HasData          *bool        `json:"has_data,omitempty"`
+	CurrentPeriod    NullableDate `json:"current_period,omitzero"`
 	ReportsAvailable *bool        `json:"reports_available,omitempty"`
 }
 
@@ -204,9 +220,47 @@ type GeoResult struct {
 func (g GeoResult) IsCountry() bool { return g.Kind == "country" || g.Level == "country" }
 
 // Queryable reports whether spending a metered /stats/current call on this row
-// can pay off. prices_available false means STOP; a null current_period means
-// this period holds nothing, though /stats/history may still answer.
-func (g GeoResult) Queryable() bool { return g.PricesAvailable && g.CurrentPeriod.Valid() }
+// can pay off. prices_available false means STOP; no data this period means
+// the current window holds nothing, though /stats/history may still answer.
+func (g GeoResult) Queryable() bool {
+	return g.PricesAvailable && DataThisPeriod(g.HasData, g.CurrentPeriod) == DataYes
+}
+
+// DataSignal is "does the newest built period hold data here", read from
+// whichever field the server sent.
+type DataSignal int
+
+const (
+	// DataUnknown — the server sent neither field (a hex page, for one).
+	// Says nothing about the place either way.
+	DataUnknown DataSignal = iota
+	// DataYes — /stats/current is worth asking.
+	DataYes
+	// DataNo — too little THIS period. NOT "no data ever": /stats/history may
+	// still answer, and the API calls this answer conservative, not proof.
+	DataNo
+)
+
+// DataThisPeriod folds the two versions of the API's signal into one answer.
+//
+// has_data (a boolean) replaced current_period (a date) on 2026-09-20, and the
+// two mean the same three things: true / a date = ask; false / null = too thin
+// this period; absent = not published. has_data wins when both are present,
+// because it is the newer contract.
+func DataThisPeriod(hasData *bool, currentPeriod NullableDate) DataSignal {
+	switch {
+	case hasData != nil && *hasData:
+		return DataYes
+	case hasData != nil:
+		return DataNo
+	case currentPeriod.Valid():
+		return DataYes
+	case currentPeriod.IsNull():
+		return DataNo
+	default:
+		return DataUnknown
+	}
+}
 
 // GeoResponse is /geo. Parent is absent on the country list, so a caller can
 // tell the root from a branch without keeping its own state.
@@ -256,7 +310,8 @@ type ZoneSummary struct {
 	Name          string       `json:"name"`
 	Ancestors     Ancestors    `json:"ancestors"`
 	GeoID         *string      `json:"geo_id"`
-	CurrentPeriod NullableDate `json:"current_period"`
+	HasData       *bool        `json:"has_data,omitempty"`
+	CurrentPeriod NullableDate `json:"current_period,omitzero"`
 	HexesURL      *string      `json:"hexes_url"`
 }
 
@@ -537,10 +592,56 @@ type CurrentStats struct {
 	Filters   Filters   `json:"filters"`
 	Stats     []Stat    `json:"stats"`
 	Snapshot  Snapshot  `json:"snapshot"`
+	// Availability says WHY stats is empty. nil on a server older than
+	// 2026-09-20, which did not send it.
+	Availability *Availability `json:"availability,omitempty"`
 
 	BinApproximations map[string]json.RawMessage `json:"bin_approximations,omitempty"`
 
 	Meta Meta `json:"-"`
+}
+
+// AvailabilityVerdict answers "why is this answer empty". An empty stats array
+// is an answer, and four different situations look identical from outside
+// until this is read — their remedies are opposites, so an agent that cannot
+// tell them apart retries the one that can never succeed.
+//
+// ⚠️ It describes OUR AGGREGATE, never the market. "No data" means we
+// published nothing for this window; it never means nothing was for sale.
+type AvailabilityVerdict struct {
+	// Status is "ok" when stats has rows, "no_data" when it does not.
+	Status string `json:"status"`
+	// Reason is null exactly when Status is "ok". The vocabulary is closed:
+	// period_not_built, no_data_for_place, below_minimum_sample,
+	// no_data_for_selection, not_determined. Treat an unknown value as
+	// not_determined, never as an error.
+	Reason  *string `json:"reason"`
+	Message string  `json:"message"`
+}
+
+// Availability is the verdict plus WHEN this territory does hold data — the
+// dates turn "empty" into a call that can succeed.
+//
+// ⚠️ The dates cover the segment (ad_type, ad_sub_type, rooms) and only the
+// window SearchedFrom names. A null date means "nothing in the window we
+// looked at", never "nothing, ever".
+type Availability struct {
+	AvailabilityVerdict
+
+	SearchedFrom           *string         `json:"searched_from"`
+	EarliestNonemptyPeriod *string         `json:"earliest_nonempty_period"`
+	LatestNonemptyPeriod   *string         `json:"latest_nonempty_period"`
+	Segment                json.RawMessage `json:"segment,omitempty"`
+	Note                   string          `json:"note,omitempty"`
+}
+
+// ReasonOrUnknown is the reason, with an absent or null one read as
+// not_determined — the API's own instruction for a value it cannot name.
+func (v AvailabilityVerdict) ReasonOrUnknown() string {
+	if v.Reason == nil || *v.Reason == "" {
+		return "not_determined"
+	}
+	return *v.Reason
 }
 
 // HistoryPoint is one period of a series. Each is an independent aggregate
@@ -555,6 +656,9 @@ type HistoryPoint struct {
 
 	BinApproximations map[string]json.RawMessage `json:"bin_approximations,omitempty"`
 	Stats             []Stat                     `json:"stats"`
+	// Availability is the verdict for this one period. The dates are stated
+	// once, on the envelope. nil on a server older than 2026-09-20.
+	Availability *AvailabilityVerdict `json:"availability,omitempty"`
 }
 
 // HistoryResponse is /stats/history — METERED, against the history group,
@@ -573,6 +677,9 @@ type HistoryResponse struct {
 	// SeriesNote restates the non-additivity in every response.
 	SeriesNote string   `json:"series_note"`
 	Snapshot   Snapshot `json:"snapshot"`
+	// Availability is the verdict for the series as a whole, plus the dates.
+	// nil on a server older than 2026-09-20.
+	Availability *Availability `json:"availability,omitempty"`
 
 	Meta Meta `json:"-"`
 }
