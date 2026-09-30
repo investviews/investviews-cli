@@ -1,6 +1,6 @@
 ---
 name: investviews
-description: Answer real-estate market questions about a named place using the InvestViews CLI — median price, price per square metre, typical size, and how those moved period by period, for a country, region, province, city, district or neighbourhood, plus which markets are covered and how fresh each one is. Use when asked what property costs somewhere, how prices there have changed, whether a market is served, or to turn a place name into the id those figures are addressed by. Requires the `investviews` binary and an API token.
+description: Answer real-estate market questions about a named place using the InvestViews CLI — median price, price per square metre, typical size, and how those moved period by period, for a country, region, province, city, district or neighbourhood, plus which markets are covered and how fresh each one is. Use when asked what property costs somewhere, how prices there have changed, whether a market is served, or to turn a place name into the id those figures are addressed by. Also use it whenever someone wants to compare places, find where to buy or invest with a budget, build a shortlist of options, or get a report to share — even when they do not name the data source or ask for a report. Requires the `investviews` binary and an API token.
 ---
 
 # InvestViews
@@ -219,6 +219,82 @@ Three rules that keep a citation honest:
   market. Say so.
 - **Never add figures across periods.** Each period is an independent aggregate, and at
   `rolling_3m` two neighbouring windows overlap by two months. Compare periods; never sum them.
+
+## 5. Comparisons, shortlists and reports
+
+Many people who ask are not analysts: "my friend has $50k, where should he invest?", "is Lviv or
+Kraków better for a rental flat?". They cannot tell you which command to run, which figure
+matters, or what shape of answer they want. They will not ask for a report, because they do not
+know one is possible. Your job is to turn the question into a structured answer they can use and
+pass on.
+
+### Ask once, with defaults, before spending
+
+When the request is broad, ask **one short round** of questions before any metered call. Offer
+choices and a default for each, so "go" is a complete answer. Skip anything the request already
+says, and never ask for something you can find for free (ids, coverage).
+
+| ask about | why it matters | default |
+|---|---|---|
+| budget and currency | sets `--max-price-usd` and what "affordable" means | as stated |
+| the goal — rental income, price growth, or a home to live in | decides the figures: rent and yield, `stats history`, or size and rooms | income + growth, for an investment question |
+| property type — flat (rooms), house, commercial, land… | check first what the data holds for that country, and say what is missing | flats |
+| where — regions or cities to include or exclude | a shortlist without limits costs many metered calls | the largest cities |
+| what they want back — a short answer in chat, a comparison table, or a report to send on (a web page or a PDF) | this is the question a non-technical person cannot phrase | a table, then offer a report |
+| who reads it, and in which language | a report for a friend may need another language | the user's language |
+
+A specific question is not a broad one. "What do 1-room flats cost in Lviv, Ternopil and
+Ivano-Frankivsk?" needs no questions and no extras: answer it with the core columns below, one
+metered call per place. Fetch rent, yield and history only when the goal is investment — otherwise
+offer them in one line ("I can add rent and the 12-month trend — 6 more calls"). "Use defaults"
+means the defaults of the question asked, not the investment set.
+
+Before a sweep of many places, say roughly how many metered calls it will take and what is left
+(`investviews usage` is free). "About 60 calls of your 100,000" is enough.
+
+### Offer the report — do not wait to be asked
+
+When the answer compares several places or options, end by offering a report, and say what it
+would contain: the comparison table, the short answer, the trend, what is missing and why. Build
+it from the `stats` calls you already made.
+
+⚠️ This CLI has **no report command**, and the API's report endpoint does **not** produce reports
+yet — requests to it stay pending. Never send the user to it. The report is yours to assemble.
+
+### The comparison table
+
+Every comparison of places carries the core columns. Add the investment columns only when the goal
+is investment.
+
+| column | when | why |
+|---|---|---|
+| **median asking price per m²** | always | the one figure you can compare across cities and flat sizes — never leave it out |
+| median asking price | always | what the typical listing costs |
+| median size (m²) | always | what that price buys |
+| median asking rent / month (and per m²) | investment | for an income goal |
+| gross yield | investment | derived — see below |
+| price change over 12 months | investment | from `stats history`, per m² |
+
+Figures are easy to misread. People take "Ivano-Frankivsk 1-room $50,100" as the price of a real
+flat. Prevent that:
+
+- **Name the statistic in every header.** "Median asking price", not "Price". "Median size", not
+  "Size". "Median" alone is not enough in a sentence either — say "median asking price of 1-room
+  flats listed in August 2026".
+- **Put one plain sentence above the table:** every figure is the median of the asking prices of
+  listings in that place, for that period. It is not the price of one flat and not a sale price.
+  The API never returns single listings.
+- **Mark what you computed, apart from what the API returned.** Gross yield = 12 × median rent ÷
+  median price. An estimate built from two medians (rent per m² × a size) is an estimate: prefix
+  it with `~` and say in a footnote how you computed it. Your own judgements (a risk rating, a
+  ranking) are labelled as yours.
+- **"What the budget buys"** comes from a price filter: the median size of listings priced inside
+  the budget (`--min-price-usd`/`--max-price-usd`). Say it that way — "listings between $38k and
+  $52k have a median size of 32 m²" — not "the budget buys 32 m²".
+- **Cite once, at the top:** period, window, currency, "as of", and that these are asking prices
+  from listings.
+- **Say what is missing and why** — a property type the data does not hold for that country, a
+  city with no figures for that room count.
 
 ## Exit codes — recover, do not guess
 
