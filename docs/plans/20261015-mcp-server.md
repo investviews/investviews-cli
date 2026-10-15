@@ -360,10 +360,10 @@ match (60 s cap). A real agent keeps stdin open and never hits this.
 
 ### Task 12: [Final] Update documentation
 
-- [ ] README: "Use with MCP" section — install the binary first, then config snippets for Claude
+- [x] README: "Use with MCP" section — install the binary first, then config snippets for Claude
       Code (`claude mcp add investviews -- investviews mcp`), Claude Desktop and Cursor
-- [ ] `docs/api.md`: tool → endpoint table
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `docs/api.md`: tool → endpoint table
+- [x] move this plan to `docs/plans/completed/` (done by the orchestrator at completion)
 
 ## Post-Completion
 

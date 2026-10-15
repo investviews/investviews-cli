@@ -68,10 +68,89 @@ claude --plugin-dir investviews-cli -p "What do flats cost in Russafa, Valencia?
 
 The CLI must still be installed and logged in (steps 2 and 3).
 
+## Use with MCP
+
+`investviews mcp` is an MCP (Model Context Protocol) server. It gives an AI agent the API as typed
+tools, so the agent does not have to run shell commands. The agent starts the server itself; you
+never run `investviews mcp` by hand.
+
+**First, install the binary and log in** — steps 2 and 3 of the quick start. The server uses the
+same token as the CLI. It starts without a token, but every tool call then fails with an error that
+says to run `investviews auth login`. A login made while the agent runs is used at once — no
+restart needed.
+
+**Claude Code.** The plugin from step 4 already registers the server. Without the plugin, add it
+with one command:
+
+```sh
+claude mcp add investviews -- investviews mcp
+```
+
+**Claude Desktop.** Add this to `claude_desktop_config.json` (on macOS:
+`~/Library/Application Support/Claude/claude_desktop_config.json`), then restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "investviews": {
+      "command": "investviews",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Claude Desktop may not see your shell's `PATH`. If the server does not start, put the full path in
+`command` — `which investviews` prints it (for example `/opt/homebrew/bin/investviews`).
+
+**Cursor.** Add the same `mcpServers` block to `~/.cursor/mcp.json` (all projects) or to
+`.cursor/mcp.json` in one project.
+
+**Token in the config instead of the file.** Any of the configs above can pass the token as an
+environment variable. It outranks the stored token, like on the command line:
+
+```json
+"investviews": {
+  "command": "investviews",
+  "args": ["mcp"],
+  "env": { "INVESTVIEWS_TOKEN": "iv_live_xxxxxxxx" }
+}
+```
+
+### The tools
+
+| tool | cost | what it does |
+|---|---|---|
+| `find_place` | free | resolve a place name to a `geo_id` (`q`, `country`, `level`, `limit`) |
+| `browse_places` | free | walk the place tree (`parent`, `level`, `limit`, `page`) |
+| `place_at_point` | free | name the H3 cell and the zones at a coordinate (`lat`, `lng`, `res`) |
+| `coverage` | free | which markets are served, and how fresh each is (`country`) |
+| `filters` | free | every value the filter arguments accept |
+| `usage` | free | what this token has spent and has left |
+| **`market_stats`** | **1 metered call** | the newest period's figures for one territory |
+| **`price_history`** | **1 metered call** | the same figures, period by period (`from`, `to`) |
+| **`compare_places`** | **1 metered call per place** | 2 to 5 places side by side (`geo_ids`), same filters |
+
+`market_stats` and `price_history` take exactly one territory: `geo_id`, or `h3`, or
+`lat` + `lng` + `radius_km`. They also take the filters `ad_type`, `ad_sub_type`, `rooms`,
+`min_size`, `max_size`, `min_price_usd`, `max_price_usd` and `currency`. `compare_places` takes the
+same filters.
+
+- Every tool description starts with **FREE** or **METERED**, so the agent knows the cost before it
+  calls.
+- A metered answer ends with a `cost:` line taken from the quota headers. A free answer has none.
+- Every failure — no token, a bad token, quota spent, a rate limit, a bad argument — comes back as
+  a tool result marked as an error, with a message the agent can show you. A rate limit gives up
+  after about 10 seconds of waiting instead of blocking the chat.
+- The server sends the agent short instructions with the skill's rules: find the place for free
+  first, spend one metered call per question, call every figure a median of asking prices.
+- Standard output carries only protocol messages. Logs go to standard error, which the agent keeps
+  as the server's log.
+
 ## Using another AI agent
 
-The CLI is an ordinary shell command, so any agent that can run commands can use it. The
-instructions Claude follows are plain Markdown in
+The CLI is an ordinary shell command, so any agent that can run commands can use it. An agent that
+speaks MCP can use the server above instead. The instructions Claude follows are plain Markdown in
 [`skills/investviews/SKILL.md`](skills/investviews/SKILL.md) — give that file to your agent as its
 guide. Claude Code is the only agent this repository ships a ready-made plugin for.
 
@@ -80,7 +159,7 @@ guide. Claude Code is the only agent this repository ships a ready-made plugin f
 | file | what it is |
 |---|---|
 | `.claude-plugin/marketplace.json` | the marketplace, named **`investviews-cli`**, listing one plugin |
-| `.claude-plugin/plugin.json` | the plugin, named **`investviews`** — hence `investviews@investviews-cli` |
+| `.claude-plugin/plugin.json` | the plugin, named **`investviews`** — hence `investviews@investviews-cli`. It also registers the MCP server (`investviews mcp`) |
 | `skills/investviews/SKILL.md` | the skill: how to go from a question to a cited figure |
 
 The skill teaches a workflow, not HTTP details: resolve the place for free, check that data exists,
