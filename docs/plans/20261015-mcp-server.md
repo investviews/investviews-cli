@@ -246,12 +246,13 @@
 **Files:**
 - Create: `internal/mcpserver/meta.go`
 - Create: `internal/mcpserver/meta_test.go`
+- ➕ Modify: `internal/mcpserver/server.go` (register), `server_test.go` (`wantTools`)
 
-- [ ] write tests per tool: request sent, `structuredContent`, short text (for `usage`: remaining
+- [x] write tests per tool: request sent, `structuredContent`, short text (for `usage`: remaining
       per group)
-- [ ] write error test: 401 from the API → `isError` that says the token is invalid
-- [ ] implement the three tools
-- [ ] run tests - must pass before next task
+- [x] write error test: 401 from the API → `isError` that says the token is invalid
+- [x] implement the three tools
+- [x] run tests - must pass before next task
 
 ### Task 6: Paid tool — `market_stats`
 

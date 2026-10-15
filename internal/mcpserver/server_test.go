@@ -27,7 +27,10 @@ func TestInitializeReportsNameAndVersion(t *testing.T) {
 
 // wantTools is the tool set registered so far, in registration order. Each
 // task that adds a tool adds its name here.
-var wantTools = []string{"find_place", "browse_places", "place_at_point"}
+var wantTools = []string{
+	"find_place", "browse_places", "place_at_point",
+	"coverage", "filters", "usage",
+}
 
 func TestToolsListNamesEveryTool(t *testing.T) {
 	session, fake := connectFake(t, nil)
