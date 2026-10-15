@@ -65,11 +65,11 @@ type findPlaceArgs struct {
 	Limit   *int   `json:"limit,omitempty" jsonschema:"maximum hits; the default and the server's cap are in the tool description"`
 }
 
-func (s *server) findPlace(ctx context.Context, _ *mcp.CallToolRequest, args findPlaceArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) findPlace(ctx context.Context, req *mcp.CallToolRequest, args findPlaceArgs) (*mcp.CallToolResult, any, error) {
 	if err := atLeastOne("limit", args.Limit); err != nil {
 		return fail(err)
 	}
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -116,14 +116,14 @@ type browsePlacesArgs struct {
 	Page   *int   `json:"page,omitempty" jsonschema:"page number from 1; the cap is in the tool description"`
 }
 
-func (s *server) browsePlaces(ctx context.Context, _ *mcp.CallToolRequest, args browsePlacesArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) browsePlaces(ctx context.Context, req *mcp.CallToolRequest, args browsePlacesArgs) (*mcp.CallToolResult, any, error) {
 	if err := atLeastOne("limit", args.Limit); err != nil {
 		return fail(err)
 	}
 	if err := atLeastOne("page", args.Page); err != nil {
 		return fail(err)
 	}
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -189,7 +189,7 @@ type placeAtPointArgs struct {
 	Res *int    `json:"res,omitempty" jsonschema:"H3 resolution of the cell; the range is in the tool description"`
 }
 
-func (s *server) placeAtPoint(ctx context.Context, _ *mcp.CallToolRequest, args placeAtPointArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) placeAtPoint(ctx context.Context, req *mcp.CallToolRequest, args placeAtPointArgs) (*mcp.CallToolResult, any, error) {
 	// ⚠️ CHECKED HERE, BEFORE THE CLIENT IS EVEN BUILT. internal/api does not
 	// range-check coordinates (the CLI's flags never produce one out of range
 	// by accident), but an agent swapping lat and lng is a common mistake, and
@@ -203,7 +203,7 @@ func (s *server) placeAtPoint(ctx context.Context, _ *mcp.CallToolRequest, args 
 			Message: fmt.Sprintf("lng must be between -180 and 180, got %v", args.Lng)})
 	}
 
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}

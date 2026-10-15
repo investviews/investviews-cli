@@ -134,13 +134,13 @@ type comparePlace struct {
 	errText string
 }
 
-func (s *server) comparePlaces(ctx context.Context, _ *mcp.CallToolRequest, args comparePlacesArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) comparePlaces(ctx context.Context, req *mcp.CallToolRequest, args comparePlacesArgs) (*mcp.CallToolResult, any, error) {
 	geoIDs, err := compareGeoIDs(args.GeoIDs)
 	if err != nil {
 		return fail(err)
 	}
 
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}

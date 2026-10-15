@@ -18,7 +18,9 @@
 //     is a long-running process inside an agent. A user who runs `investviews
 //     auth login` while it runs must not have to restart the agent, and a
 //     missing token must come back from the factory as a tool error on the
-//     call that needed it — not as a server that refused to start.
+//     call that needed it — not as a server that refused to start. The hosted
+//     mode (http.go) leans on the same rule: one shared server, and each call
+//     builds its client from the bearer token of the request that made it.
 package mcpserver
 
 import (
@@ -54,10 +56,20 @@ var instructions string
 // is none; tests point it at an httptest server.
 type ClientFactory func() (*api.Client, error)
 
-// server is the state every tool handler shares. It holds the factory, not a
+// TokenClientFactory builds an API client for one bearer token. The hosted
+// mode (http.go) calls it once per tool call, with the token of the request
+// that made the call.
+type TokenClientFactory func(token string) (*api.Client, error)
+
+// server is the state every tool handler shares. It holds a factory, not a
 // client — see rule 2 in the package comment.
+//
+// Exactly one of the two factories is set: newClient on stdio, where the token
+// comes from the user's config; tokenClient in the hosted mode, where it comes
+// from each request. client() picks by which one is set.
 type server struct {
-	newClient ClientFactory
+	newClient   ClientFactory
+	tokenClient TokenClientFactory
 }
 
 // New builds the MCP server. version is the build stamp
@@ -75,8 +87,13 @@ type server struct {
 // The server is returned unconnected: the caller picks the transport (stdio
 // for `investviews mcp`, in-memory for tests).
 func New(newClient ClientFactory, version string, logger *slog.Logger) *mcp.Server {
-	s := &server{newClient: newClient}
+	return build(&server{newClient: newClient}, version, logger)
+}
 
+// build is New for either kind of server: the stdio one from New, and the
+// hosted one from NewHTTPHandler. Both get the same tools, instructions and
+// per-call deadline, so the local and the hosted server cannot drift apart.
+func build(s *server, version string, logger *slog.Logger) *mcp.Server {
 	serverOpts := &mcp.ServerOptions{
 		Instructions: instructions,
 		// ⚠️ THE TOOLS CAPABILITY IS SET EXPLICITLY. The SDK only infers it

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -327,5 +329,150 @@ func TestCountingReaderDeliversBytesReturnedWithEOF(t *testing.T) {
 	n, err = r.Read(buf)
 	if n != 0 || err != io.EOF {
 		t.Errorf("second Read = %d, %v; want 0, io.EOF", n, err)
+	}
+}
+
+// ── hosted mode (--http) ─────────────────────────────────────────────────────
+// The handler itself is tested in internal/mcpserver; these prove the command
+// wiring: the flags, the start line, and a clean stop.
+
+// lockedBuffer is a buffer the running command writes to while the test
+// reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// hostedRoot is a root command whose Deps point the hosted mode at apiURL.
+// Its stdio factory fails the test: the hosted mode must never use the
+// operator's own token.
+func hostedRoot(t *testing.T, apiURL string, stdout, stderr io.Writer, args ...string) *cobra.Command {
+	t.Helper()
+	root := &cobra.Command{Use: "investviews", SilenceUsage: true, SilenceErrors: true}
+	deps := Deps{
+		NewClient: func() (*api.Client, error) {
+			t.Error("the hosted mode used the stdio client factory")
+			return nil, ErrNoToken
+		},
+		APIURL: func() (string, error) { return apiURL, nil },
+	}
+	for _, sub := range All(deps) {
+		root.AddCommand(sub)
+	}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(args)
+	return root
+}
+
+var listenLine = regexp.MustCompile(`serving MCP over HTTP on (http://127\.0\.0\.1:\d+)`)
+
+func TestMCPHTTPServesUntilStopped(t *testing.T) {
+	var stdout, stderr lockedBuffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr, "mcp", "--http", "127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+
+	var base string
+	deadline := time.Now().Add(5 * time.Second)
+	for base == "" {
+		if m := listenLine.FindStringSubmatch(stderr.String()); m != nil {
+			base = m[1]
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("mcp --http exited early: %v\nstderr: %s", err, stderr.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no start line on stderr after 5s:\n%s", stderr.String())
+		}
+	}
+
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /healthz = %d, want 200", resp.StatusCode)
+	}
+
+	// The defaults are the production URLs.
+	resp, err = http.Get(base + "/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatalf("GET metadata: %v", err)
+	}
+	var doc struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&doc)
+	_ = resp.Body.Close()
+	if doc.Resource != "https://mcp.investviews.ai/mcp" {
+		t.Errorf("resource = %q, want https://mcp.investviews.ai/mcp", doc.Resource)
+	}
+	if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != "https://api.investviews.ai" {
+		t.Errorf("authorization_servers = %v, want [https://api.investviews.ai]", doc.AuthorizationServers)
+	}
+
+	resp, err = http.Post(base+"/mcp", "application/json", strings.NewReader(initializeFrame))
+	if err != nil {
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /mcp with no token = %d, want 401", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("a stopped server returned %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mcp --http did not stop within 5s of its context ending")
+	}
+	if stdout.String() != "" {
+		t.Errorf("the hosted mode wrote to stdout: %q", stdout.String())
+	}
+}
+
+func TestMCPHTTPFlagsAreRefusedWithoutHTTP(t *testing.T) {
+	for _, flag := range []string{"--public-url", "--auth-server"} {
+		var stdout, stderr bytes.Buffer
+		root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr,
+			"mcp", flag, "https://example.investviews.ai")
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "--http") {
+			t.Errorf("mcp %s without --http: err = %v, want one that names --http", flag, err)
+		}
+	}
+}
+
+func TestMCPHTTPRefusesABadPublicURL(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr,
+		"mcp", "--http", "127.0.0.1:0", "--public-url", "https://mcp.investviews.ai/mcp")
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "public URL") {
+		t.Errorf("err = %v, want a public URL error", err)
 	}
 }

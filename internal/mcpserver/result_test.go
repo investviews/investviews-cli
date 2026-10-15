@@ -63,7 +63,7 @@ func mustContain(t *testing.T, got, want string) {
 
 // usageProbe is the simplest real call: GET /usage, then ok() or fail().
 func usageProbe(ctx context.Context, s *server) (*mcp.CallToolResult, any, error) {
-	c, err := s.client()
+	c, err := s.client(nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -77,7 +77,7 @@ func usageProbe(ctx context.Context, s *server) (*mcp.CallToolResult, any, error
 // statsProbe is a metered call: GET /stats/current for one geo_id.
 func statsProbe(params api.StatsParams) probeFunc {
 	return func(ctx context.Context, s *server) (*mcp.CallToolResult, any, error) {
-		c, err := s.client()
+		c, err := s.client(nil)
 		if err != nil {
 			return fail(err)
 		}
@@ -142,7 +142,7 @@ func TestFailListsDidYouMeanWithGeoIDs(t *testing.T) {
 	})
 
 	res := callProbe(t, f.factory(t), func(ctx context.Context, s *server) (*mcp.CallToolResult, any, error) {
-		c, err := s.client()
+		c, err := s.client(nil)
 		if err != nil {
 			return fail(err)
 		}
@@ -313,7 +313,7 @@ func TestOkCarriesAwkwardPayloadsAsStructuredContent(t *testing.T) {
 	})
 
 	res := callProbe(t, f.factory(t), func(ctx context.Context, s *server) (*mcp.CallToolResult, any, error) {
-		c, err := s.client()
+		c, err := s.client(nil)
 		if err != nil {
 			return fail(err)
 		}

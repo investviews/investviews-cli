@@ -58,8 +58,8 @@ type coverageArgs struct {
 	Country string `json:"country,omitempty" jsonschema:"restrict to one ISO 3166-1 alpha-2 country code, e.g. es"`
 }
 
-func (s *server) coverage(ctx context.Context, _ *mcp.CallToolRequest, args coverageArgs) (*mcp.CallToolResult, any, error) {
-	c, err := s.client()
+func (s *server) coverage(ctx context.Context, req *mcp.CallToolRequest, args coverageArgs) (*mcp.CallToolResult, any, error) {
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -102,8 +102,8 @@ func lastParsedText(v *string) string {
 // filters
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (s *server) filters(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	c, err := s.client()
+func (s *server) filters(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -157,8 +157,8 @@ var groupTools = map[string]string{
 	"history": "price_history",
 }
 
-func (s *server) usage(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	c, err := s.client()
+func (s *server) usage(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}

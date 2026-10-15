@@ -80,7 +80,8 @@ Documentation: https://docs.investviews.ai`,
 	cmd.PersistentFlags().StringVar(&tokenFlag, "token", "",
 		"API token; outranks "+config.EnvToken+" and the config file")
 	cmd.AddCommand(newAuthCmd(&tokenFlag), newVersionCmd())
-	for _, sub := range commands.All(commands.Deps{NewClient: newClient(&tokenFlag)}) {
+	deps := commands.Deps{NewClient: newClient(&tokenFlag), APIURL: apiURL}
+	for _, sub := range commands.All(deps) {
 		cmd.AddCommand(sub)
 	}
 
@@ -103,6 +104,17 @@ func newClient(tokenFlag *string) func() (*api.Client, error) {
 		}
 		return api.New(api.Options{BaseURL: cfg.APIURL, Token: cfg.Token})
 	}
+}
+
+// apiURL is the base URL alone, for the hosted MCP mode. It reads the same
+// sources as every command (INVESTVIEWS_API_URL, else the default), and ignores
+// the token: a hosted server sends each request with that request's token.
+func apiURL() (string, error) {
+	cfg, err := loadConfig("")
+	if err != nil {
+		return "", err
+	}
+	return cfg.APIURL, nil
 }
 
 // loadConfig resolves the configuration for one command run.

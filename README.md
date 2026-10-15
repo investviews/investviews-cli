@@ -70,9 +70,38 @@ The CLI must still be installed and logged in (steps 2 and 3).
 
 ## Use with MCP
 
-`investviews mcp` is an MCP (Model Context Protocol) server. It gives an AI agent the API as typed
-tools, so the agent does not have to run shell commands. The agent starts the server itself; you
-never run `investviews mcp` by hand.
+InvestViews is an MCP (Model Context Protocol) server. It gives an AI agent the API as typed tools,
+so the agent does not have to run shell commands. There are two ways to connect: the hosted server
+(nothing to install) and the local server (`investviews mcp`, runs on your computer). Both serve the
+same tools.
+
+### Hosted server — nothing to install
+
+Add this URL to your agent as a remote MCP server (in Claude Desktop and claude.ai: Settings →
+Connectors → Add custom connector):
+
+```
+https://mcp.investviews.ai/mcp
+```
+
+Click **Connect**. A sign-in window opens on investviews.ai; sign in and click **Allow**. The agent
+gets its own read-only API token. It is listed in your account under API tokens, and removing it
+there disconnects the agent. The tools need a PRO plan.
+
+In Claude Code:
+
+```sh
+claude mcp add --transport http investviews https://mcp.investviews.ai/mcp
+```
+
+The hosted server is `investviews mcp --http` (see `investviews mcp --help`). It checks each token
+with the API at most once a minute and sends every API call with the caller's own token, so
+metering, plan checks and revocation work exactly as for the CLI.
+
+### Local server — `investviews mcp`
+
+Use this instead if you want the server on your own computer. The agent starts it itself; you never
+run `investviews mcp` by hand.
 
 **First, install the binary and log in** — steps 2 and 3 of the quick start. The server uses the
 same token as the CLI. It starts without a token, but every tool call then fails with an error that
@@ -185,7 +214,7 @@ either stops to ask permission it does not need, or burns quota it did not have 
 | `geo hexes <geo_id>` | free | list a place's H3 cells (`--ids-only` for a pipe) |
 | `coverage` | free | which markets are served, and how fresh each is |
 | `usage` | free | what this token has spent and has left |
-| `mcp` | free to start (the tools it serves may be metered) | serve the API to an AI agent as MCP tools over stdio — see [Use with MCP](#use-with-mcp) |
+| `mcp` | free to start (the tools it serves may be metered) | serve the API to an AI agent as MCP tools over stdio, or over HTTP with `--http` — see [Use with MCP](#use-with-mcp) |
 | **`stats current`** | **METERED** | figures for the newest built period |
 | **`stats history`** | **METERED** | the same figures, period by period |
 
