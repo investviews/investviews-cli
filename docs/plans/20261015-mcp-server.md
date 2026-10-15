@@ -338,12 +338,12 @@ match (60 s cap). A real agent keeps stdin open and never hits this.
 - Modify: `.claude-plugin/marketplace.json`
 - Modify: `skills/investviews/SKILL.md`
 
-- [ ] add `mcpServers.investviews` → `{"command": "investviews", "args": ["mcp"]}`
-- [ ] SKILL.md: one short section — when the MCP tools are present, use them instead of shelling
+- [x] add `mcpServers.investviews` → `{"command": "investviews", "args": ["mcp"]}`
+- [x] SKILL.md: one short section — when the MCP tools are present, use them instead of shelling
       out to the CLI; same rules apply; the binary must be installed first (`brew install`)
-- [ ] bump the plugin version in both `plugin.json` and `marketplace.json`
-- [ ] check: `go test ./...` still passes; both JSON files are valid
-- [ ] run tests - must pass before next task
+- [x] bump the plugin version in both `plugin.json` and `marketplace.json`
+- [x] check: `go test ./...` still passes; both JSON files are valid
+- [x] run tests - must pass before next task
 
 ### Task 11: Verify acceptance criteria
 
