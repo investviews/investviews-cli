@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +38,32 @@ func TestToolsListIsEmpty(t *testing.T) {
 	// Listing tools is protocol-only: it must never reach the API.
 	if fake.hits() != 0 {
 		t.Errorf("tools/list sent %d API requests, want 0", fake.hits())
+	}
+}
+
+// TestInitializeCarriesInstructions checks that the agent gets the skill's
+// rules with the handshake. An agent connected over MCP may never see
+// SKILL.md, so these rules are the only copy it reads: losing one means an
+// agent that calls a median "the price" or spends a metered call exploring.
+func TestInitializeCarriesInstructions(t *testing.T) {
+	session, _ := connectFake(t, nil)
+
+	got := session.InitializeResult().Instructions
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("initialize returned no instructions")
+	}
+	for _, rule := range []string{
+		"median of asking prices",    // name the statistic
+		"median asking price per m²", // always show price per m²
+		"Free tools first",           // free before paid
+		"find_place",                 // resolve the place with a free tool
+		"market_stats",               // the paid call it leads to
+		"/reports",                   // never the API's report endpoint
+		"Never call it",
+		`"~"`, // mark estimates
+	} {
+		if !strings.Contains(got, rule) {
+			t.Errorf("instructions do not contain %q", rule)
+		}
 	}
 }

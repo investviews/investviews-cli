@@ -22,6 +22,8 @@
 package mcpserver
 
 import (
+	_ "embed"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/investviews/investviews-cli/internal/api"
@@ -30,6 +32,18 @@ import (
 // Name is the server name an agent sees in `initialize`. It matches the binary
 // and the Claude Code plugin's mcpServers key, so the three never drift.
 const Name = "investviews"
+
+// instructions is the text an agent receives with `initialize`: a short form of
+// the rules in skills/investviews/SKILL.md (free before paid, name the
+// statistic, always show price per m², never the API's /reports).
+//
+// ⚠️ IT IS A SECOND COPY OF THE SKILL'S RULES, ON PURPOSE. An agent connected
+// over MCP may never load SKILL.md — Claude Desktop and Cursor have no skill —
+// so this is the only copy it reads. When a rule changes in SKILL.md, change it
+// here too. It stays short because the client puts it into every conversation.
+//
+//go:embed instructions.md
+var instructions string
 
 // ClientFactory builds an API client for one tool call. In the binary it is
 // commands.Deps.NewClient, which reads the saved token and returns
@@ -54,6 +68,7 @@ func New(newClient ClientFactory, version string) *mcp.Server {
 	srv := mcp.NewServer(
 		&mcp.Implementation{Name: Name, Version: version},
 		&mcp.ServerOptions{
+			Instructions: instructions,
 			// ⚠️ THE TOOLS CAPABILITY IS SET EXPLICITLY. The SDK only infers it
 			// once a tool is added, and a server that does not advertise it
 			// makes a well-behaved client skip tools/list entirely. The tool

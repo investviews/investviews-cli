@@ -192,11 +192,11 @@
 - Modify: `internal/mcpserver/server.go`
 - Modify: `internal/mcpserver/server_test.go`
 
-- [ ] write test: `initialize` result has non-empty `instructions` containing the key rules
+- [x] write test: `initialize` result has non-empty `instructions` containing the key rules
       (median of asking prices, price per m², free tools before paid, no `/reports`)
-- [ ] write `instructions.md` from `skills/investviews/SKILL.md` (short; under ~60 lines)
-- [ ] embed it with `go:embed` and pass it in `ServerOptions.Instructions`
-- [ ] run tests - must pass before next task
+- [x] write `instructions.md` from `skills/investviews/SKILL.md` (short; under ~60 lines)
+- [x] embed it with `go:embed` and pass it in `ServerOptions.Instructions`
+- [x] run tests - must pass before next task
 
 ### Task 3: Shared helpers in `internal/api`, result and error mapping
 
