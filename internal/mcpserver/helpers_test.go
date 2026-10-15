@@ -94,11 +94,18 @@ func (f *fakeAPI) factory(t *testing.T) ClientFactory {
 // ends.
 func connect(t *testing.T, factory ClientFactory) *mcp.ClientSession {
 	t.Helper()
+	return connectServer(t, New(factory, testVersion))
+}
+
+// connectServer is connect for a server the test built itself — a probe tool
+// that exercises one helper without waiting for the tool that will use it.
+func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
-	serverSession, err := New(factory, testVersion).Connect(ctx, serverTransport, nil)
+	serverSession, err := srv.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatalf("server Connect: %v", err)
 	}

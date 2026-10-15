@@ -121,6 +121,11 @@ type Options struct {
 	BackoffBase time.Duration
 	MaxBackoff  time.Duration
 
+	// RetryBudget caps the TOTAL time one call may spend sleeping between
+	// retries. Zero means no budget beyond MaxRetries and MaxRetryAfter —
+	// the CLI's behaviour. See WithRetryBudget.
+	RetryBudget time.Duration
+
 	// Sleep waits for d or until ctx is done. Tests replace it to assert on
 	// retry timing without waiting; nothing else does.
 	Sleep func(ctx context.Context, d time.Duration) error
@@ -138,6 +143,7 @@ type Client struct {
 	maxRetries  int
 	backoffBase time.Duration
 	maxBackoff  time.Duration
+	retryBudget time.Duration
 	sleep       func(ctx context.Context, d time.Duration) error
 	jitter      func(time.Duration) time.Duration
 }
@@ -164,6 +170,7 @@ func New(opts Options) (*Client, error) {
 		maxRetries:  opts.MaxRetries,
 		backoffBase: opts.BackoffBase,
 		maxBackoff:  opts.MaxBackoff,
+		retryBudget: opts.RetryBudget,
 		sleep:       opts.Sleep,
 		jitter:      opts.Jitter,
 	}
@@ -192,6 +199,28 @@ func New(opts Options) (*Client, error) {
 		c.jitter = defaultJitter
 	}
 	return c, nil
+}
+
+// WithRetryBudget returns a copy of c whose calls give up instead of sleeping
+// once the waits between retries would add up to more than budget. c itself is
+// not changed. A budget of zero or less removes the cap.
+//
+// ⚠️ IT EXISTS FOR CALLERS THAT ARE NOT A TERMINAL. The CLI honours a 429's
+// Retry-After for up to MaxRetryAfter (two minutes), which is right for a
+// person who ran one command and can see it waiting. An agent's tool call is
+// different: two minutes of silence reads as a hung tool, and the agent cannot
+// tell "waiting on a burst limit" from "broken". The MCP server sets a short
+// budget, so a 429 comes back fast as an error the agent can read and act on.
+//
+// A wait that would cross the budget is not shortened — the call returns the
+// error it has. Shortening a server-sent Retry-After only buys a second 429.
+func (c *Client) WithRetryBudget(budget time.Duration) *Client {
+	cp := *c
+	if budget < 0 {
+		budget = 0
+	}
+	cp.retryBudget = budget
+	return &cp
 }
 
 // BaseURL is the base this client talks to.
@@ -235,6 +264,7 @@ func (c *Client) getRaw(ctx context.Context, req request) ([]byte, Meta, error) 
 		return nil, Meta{}, err
 	}
 
+	var slept time.Duration
 	for attempt := 0; ; attempt++ {
 		body, meta, err := c.attempt(ctx, endpoint, req, attempt+1)
 		if err == nil {
@@ -250,9 +280,13 @@ func (c *Client) getRaw(ctx context.Context, req request) ([]byte, Meta, error) 
 		if !ok {
 			return nil, meta, err
 		}
+		if c.retryBudget > 0 && slept+wait > c.retryBudget {
+			return nil, meta, err
+		}
 		if err := c.sleep(ctx, wait); err != nil {
 			return nil, meta, err
 		}
+		slept += wait
 	}
 }
 

@@ -203,21 +203,26 @@
 **Files:**
 - Modify: `internal/api/types.go` (or a new `internal/api/signal.go`)
 - Modify: `internal/commands/commands.go`, `internal/commands/geo.go` (call the moved helper)
+- ➕ Create: `internal/api/signal.go` (`api.PlaceAvailability` → `PlaceSignal`), `internal/api/signal_test.go`
+- ➕ Modify: `internal/api/client.go` (`Options.RetryBudget`, `Client.WithRetryBudget`), `internal/api/client_test.go`
+- ➕ note: the shared helper returns the DECISION (`PlaceSignal`), not the CLI's sentence — the
+  sentence names CLI commands. `geo.go` needed no change: it still calls `availability()`, which
+  now reads `api.PlaceAvailability`.
 - Create: `internal/mcpserver/result.go`
 - Create: `internal/mcpserver/result_test.go`
 - Modify: `internal/api/*_test.go` for the moved helper
 
-- [ ] move the geo three-state `availability()` into `internal/api` as an exported function; CLI
+- [x] move the geo three-state `availability()` into `internal/api` as an exported function; CLI
       calls it; existing CLI tests stay green with no output change
-- [ ] write tests: `APIError` → `isError` text with message, `docs_url` and `Hint()`; transport
+- [x] write tests: `APIError` → `isError` text with message, `docs_url` and `Hint()`; transport
       error → `isError`; factory error (`ErrNoToken`) → `isError` with its text; metered `Meta` →
       cost line from `Meta.Cost()`; free `Meta` → no cost line; flag names rewritten to argument
       names
-- [ ] write test: payload with array and null `ancestors`, null `current_period` and raw
+- [x] write test: payload with array and null `ancestors`, null `current_period` and raw
       `filters` goes into `structuredContent` without a protocol error
-- [ ] implement `ok(payload, text, meta)` and `fail(err)` helpers (`Out = any`)
-- [ ] implement the per-call client: call `newClient`, apply the capped retry wait
-- [ ] run tests - must pass before next task
+- [x] implement `ok(payload, text, meta)` and `fail(err)` helpers (`Out = any`)
+- [x] implement the per-call client: call `newClient`, apply the capped retry wait
+- [x] run tests - must pass before next task
 
 ### Task 4: Free geography tools — `find_place`, `browse_places`, `place_at_point`
 

@@ -205,17 +205,19 @@ func table(w io.Writer, write func(io.Writer)) {
 // older than 2026-09-20 (see api.DataThisPeriod). The words are the same for
 // both, so the skill's table does not depend on which server answered — only
 // the old API names the period, and then the line names it too.
+//
+// The DECISION is api.PlaceAvailability, shared with the MCP server; only the
+// words are the CLI's own, because they name CLI commands.
 func availability(pricesAvailable bool, hasData *bool, period api.NullableDate) string {
-	if !pricesAvailable {
+	switch api.PlaceAvailability(pricesAvailable, hasData, period) {
+	case api.SignalDead:
 		return "no prices — dead end, do not spend a metered call"
-	}
-	switch api.DataThisPeriod(hasData, period) {
-	case api.DataYes:
+	case api.SignalAsk:
 		if hasData == nil {
 			return "prices, current period " + period.Value() + " — ask stats current"
 		}
 		return "prices, data in the current period — ask stats current"
-	case api.DataNo:
+	case api.SignalThin:
 		return "prices, but nothing in the current period — try stats history, not a dead end"
 	default:
 		// Neither key was sent. This endpoint does not publish the signal,
