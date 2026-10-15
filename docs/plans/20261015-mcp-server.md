@@ -140,7 +140,7 @@
   - `find_place{q, country, level, limit}` — no paging; the server clamps `limit` at 50.
   - `browse_places{parent, level, limit, page}` — `limit`/`page` checked against `GeoMaxLimit` /
     `GeoMaxPage`; the description states both meanings of `level`.
-  - `place_at_point{lat, lng, level}`.
+  - `place_at_point{lat, lng, res}` (the API takes `res`, not `level`).
   - `market_stats{geo_id | h3[] | lat+lng+radius_km, res, ad_type, ad_sub_type, rooms[], min_size,
     max_size, min_price_usd, max_price_usd, currency}`; `price_history` adds `from`, `to`.
 - Territory: exactly one of `geo_id`, `h3`, or `lat`+`lng`+`radius_km`. Validation stays in
@@ -229,15 +229,17 @@
 **Files:**
 - Create: `internal/mcpserver/geo.go`
 - Create: `internal/mcpserver/geo_test.go`
+- ➕ Modify: `internal/mcpserver/server.go` (register), `server_test.go` (tools/list names the tools), `helpers_test.go` (`callTool`, `structured`, `wantQuery`)
+- ➕ note: `place_at_point` takes `res` (H3 resolution), not `level` — `/geo/lookup` has no level parameter and returns every containing zone; lat/lng ranges are checked in the MCP layer (no request)
 
-- [ ] write tests per tool: arguments → expected request path + query; payload in
+- [x] write tests per tool: arguments → expected request path + query; payload in
       `structuredContent`; text lists name, geo id, ancestry and the three-state signal
-- [ ] write test: `tools/list` input schema marks only `q` (find_place) and `lat`, `lng`
+- [x] write test: `tools/list` input schema marks only `q` (find_place) and `lat`, `lng`
       (place_at_point) as required
-- [ ] write error tests: empty query; lat/lng out of range; `limit`/`page` over the max (no request);
+- [x] write error tests: empty query; lat/lng out of range; `limit`/`page` over the max (no request);
       404 `unknown_place` with `did_you_mean` → suggestions in the text
-- [ ] implement the three tools with annotations
-- [ ] run tests - must pass before next task
+- [x] implement the three tools with annotations
+- [x] run tests - must pass before next task
 
 ### Task 5: Free meta tools — `coverage`, `filters`, `usage`
 

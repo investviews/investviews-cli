@@ -2,8 +2,10 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -171,5 +173,58 @@ func meteredJSON(body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		meteredHeaders(w)
 		writeBody(w, http.StatusOK, body)
+	}
+}
+
+// callTool calls one tool by name with args and returns the result the client
+// received. A protocol error fails the test: every failure this server reports
+// must arrive as a tool result with isError, which is what an agent can read.
+func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("tools/call %s returned a protocol error, want a tool result: %v", name, err)
+	}
+	return res
+}
+
+// structured decodes a result's structuredContent into out, through JSON —
+// the same bytes an agent's client would read.
+func structured(t *testing.T, res *mcp.CallToolResult, out any) {
+	t.Helper()
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structuredContent: %v", err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("decode structuredContent: %v\n%s", err, raw)
+	}
+}
+
+// query parses a recorded request's query string, failing the test on a bad
+// one, so a test can compare parameters without caring about their order.
+func (r recordedRequest) query(t *testing.T) url.Values {
+	t.Helper()
+	v, err := url.ParseQuery(r.Query)
+	if err != nil {
+		t.Fatalf("parse query %q: %v", r.Query, err)
+	}
+	return v
+}
+
+// wantQuery checks a request's query is exactly want: every key present with
+// that value, and no other key sent.
+func wantQuery(t *testing.T, r recordedRequest, want map[string]string) {
+	t.Helper()
+	got := r.query(t)
+	for k, v := range want {
+		if got.Get(k) != v {
+			t.Errorf("query %s = %q, want %q (full query %q)", k, got.Get(k), v, r.Query)
+		}
+	}
+	for k := range got {
+		if _, expected := want[k]; !expected {
+			t.Errorf("query sent unexpected %s=%q (full query %q)", k, got.Get(k), r.Query)
+		}
 	}
 }

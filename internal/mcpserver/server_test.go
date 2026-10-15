@@ -25,15 +25,28 @@ func TestInitializeReportsNameAndVersion(t *testing.T) {
 	}
 }
 
-func TestToolsListIsEmpty(t *testing.T) {
+// wantTools is the tool set registered so far, in registration order. Each
+// task that adds a tool adds its name here.
+var wantTools = []string{"find_place", "browse_places", "place_at_point"}
+
+func TestToolsListNamesEveryTool(t *testing.T) {
 	session, fake := connectFake(t, nil)
 
 	res, err := session.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("tools/list: %v", err)
 	}
-	if len(res.Tools) != 0 {
-		t.Errorf("tools/list returned %d tools, want 0", len(res.Tools))
+	got := map[string]bool{}
+	for _, tool := range res.Tools {
+		got[tool.Name] = true
+	}
+	if len(res.Tools) != len(wantTools) {
+		t.Errorf("tools/list returned %d tools, want %d", len(res.Tools), len(wantTools))
+	}
+	for _, name := range wantTools {
+		if !got[name] {
+			t.Errorf("tools/list is missing %q", name)
+		}
 	}
 	// Listing tools is protocol-only: it must never reach the API.
 	if fake.hits() != 0 {
