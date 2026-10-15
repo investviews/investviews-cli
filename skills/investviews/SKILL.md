@@ -45,8 +45,11 @@ question, cite the period and the place. A metered answer ends with the same `co
 one has none.
 
 The server is the same `investviews` binary, so it must be installed first (`brew install`, above)
-and it uses the token from `investviews auth login`. If the tools are missing, the binary is not on
-the `PATH`; use the CLI commands below instead.
+and it uses the token from `investviews auth login`. If the tools are missing, either the binary is
+not on the `PATH`, or it is too old to have the `mcp` command (v0.2.1 and older do not —
+`investviews version` says which one is installed, and `investviews mcp --help` answers
+`unknown command` on an old one). Tell the user to upgrade the binary, and use the CLI commands below
+meanwhile.
 
 ## 1. Free, then metered — read the `cost:` line
 

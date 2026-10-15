@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,14 +66,13 @@ Standard output carries only protocol messages. Logs go to standard error.`,
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		stderr := cmd.ErrOrStderr()
 		logger := slog.New(slog.NewTextHandler(stderr, nil))
-		srv := mcpserver.New(mcpserver.ClientFactory(deps.client), version.Version,
-			mcpserver.WithLogger(logger))
+		srv := mcpserver.New(deps.client, version.Version, logger)
 
 		fmt.Fprintf(stderr, "investviews mcp %s: serving MCP on stdio; logs on stderr\n", version.Version)
 
 		inflight := newInflight(drainTimeout)
 		transport := &mcp.IOTransport{
-			Reader: io.NopCloser(inflight.reader(cmd.InOrStdin())),
+			Reader: io.NopCloser(inflight.reader(cmd.Context(), cmd.InOrStdin())),
 			Writer: nopWriteCloser{inflight.writer(cmd.OutOrStdout())},
 		}
 		err := srv.Run(cmd.Context(), transport)
@@ -94,9 +94,11 @@ type nopWriteCloser struct{ io.Writer }
 func (nopWriteCloser) Close() error { return nil }
 
 // drainTimeout is the longest the server waits, after stdin ends, for answers
-// to requests it has already read. It covers a metered call's retry budget
-// (10 s) plus the HTTP round trips, with room to spare.
-const drainTimeout = 60 * time.Second
+// to requests it has already read. Every tool call is cut off at
+// mcpserver.ToolTimeout — retries, HTTP attempts and every place of
+// compare_places included — so a few seconds over that is enough for the
+// answer to be written.
+const drainTimeout = mcpserver.ToolTimeout + 5*time.Second
 
 // inflight counts requests read from stdin that have no answer on stdout yet,
 // so the end of stdin can wait for them.
@@ -130,8 +132,10 @@ func (f *inflight) add(delta int) {
 	f.mu.Unlock()
 }
 
-// wait blocks until no request is pending or the timeout runs out.
-func (f *inflight) wait() {
+// wait blocks until no request is pending, the timeout runs out, or ctx is
+// done — Ctrl-C must not sit out the timeout for a request that will never
+// be answered.
+func (f *inflight) wait(ctx context.Context) {
 	deadline := time.After(f.timeout)
 	for {
 		f.mu.Lock()
@@ -144,36 +148,55 @@ func (f *inflight) wait() {
 		case <-changed:
 		case <-deadline:
 			return
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-func (f *inflight) reader(r io.Reader) io.Reader {
-	return &countingReader{r: r, f: f}
+func (f *inflight) reader(ctx context.Context, r io.Reader) io.Reader {
+	return &countingReader{ctx: ctx, r: r, f: f}
 }
 
 func (f *inflight) writer(w io.Writer) io.Writer {
 	return &countingWriter{w: w, f: f}
 }
 
-// frameKind says whether one newline-delimited JSON-RPC frame is a request
-// (method + id), a response (id, no method) or neither. A batch array or a
-// frame that does not parse is neither: the SDK answers it with its own
-// error, and counting it wrong could only make the drain wait for the
-// timeout, never lose an answer.
-func frameKind(line []byte) (request, response bool) {
+// frameKind counts the requests (method + id) and responses (id, no method)
+// in one newline-delimited JSON-RPC frame. A batch array counts each of its
+// members: the SDK accepts batches under older protocol versions and answers
+// them with a batch, so both sides stay balanced. A frame that does not parse
+// counts nothing: the SDK answers it with its own error, and counting it
+// wrong could only make the drain wait for the timeout, never lose an answer.
+func frameKind(line []byte) (requests, responses int) {
+	if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && trimmed[0] == '[' {
+		var batch []json.RawMessage
+		if json.Unmarshal(trimmed, &batch) != nil {
+			return 0, 0
+		}
+		for _, member := range batch {
+			req, resp := frameKind(member)
+			requests += req
+			responses += resp
+		}
+		return requests, responses
+	}
 	var frame struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 	}
 	if json.Unmarshal(line, &frame) != nil {
-		return false, false
+		return 0, 0
 	}
 	hasID := len(frame.ID) > 0 && !bytes.Equal(frame.ID, []byte("null"))
-	if !hasID {
-		return false, false
+	switch {
+	case !hasID:
+		return 0, 0
+	case frame.Method != "":
+		return 1, 0
+	default:
+		return 0, 1
 	}
-	return frame.Method != "", frame.Method == ""
 }
 
 // lines splits a byte stream into complete lines, keeping a partial last line
@@ -195,26 +218,48 @@ func (l *lines) feed(chunk []byte, each func([]byte)) {
 }
 
 type countingReader struct {
+	ctx   context.Context
 	r     io.Reader
 	f     *inflight
 	split lines
+	// eof is an EOF that came back together with bytes. It is held for the
+	// next Read, so those bytes reach the SDK before the drain waits for
+	// their answers.
+	eof error
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	count := func(line []byte) {
-		if req, _ := frameKind(line); req {
-			c.f.add(1)
-		}
+	if c.eof != nil {
+		return 0, c.drain(c.eof)
 	}
-	c.split.feed(p[:n], count)
+	n, err := c.r.Read(p)
+	c.split.feed(p[:n], c.count)
 	if errors.Is(err, io.EOF) {
-		// A last frame with no newline after it is still a request the SDK
-		// will answer, so it is counted before waiting.
-		c.split.feed([]byte{'\n'}, count)
-		c.f.wait()
+		// ⚠️ io.Reader may return the last bytes WITH io.EOF. Waiting now
+		// would hold back the very request the wait is for, so the bytes go
+		// out first and the EOF is returned on the next call.
+		if n > 0 {
+			c.eof = err
+			return n, nil
+		}
+		return 0, c.drain(err)
 	}
 	return n, err
+}
+
+// drain waits for every counted request to be answered, then hands back the
+// EOF. A last frame with no newline after it is still a request the SDK will
+// answer, so it is counted before waiting.
+func (c *countingReader) drain(eof error) error {
+	c.split.feed([]byte{'\n'}, c.count)
+	c.f.wait(c.ctx)
+	return eof
+}
+
+func (c *countingReader) count(line []byte) {
+	if req, _ := frameKind(line); req > 0 {
+		c.f.add(req)
+	}
 }
 
 type countingWriter struct {
@@ -226,8 +271,8 @@ type countingWriter struct {
 func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.split.feed(p[:n], func(line []byte) {
-		if _, resp := frameKind(line); resp {
-			c.f.add(-1)
+		if _, resp := frameKind(line); resp > 0 {
+			c.f.add(-resp)
 		}
 	})
 	return n, err

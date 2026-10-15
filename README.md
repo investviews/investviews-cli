@@ -79,6 +79,12 @@ same token as the CLI. It starts without a token, but every tool call then fails
 says to run `investviews auth login`. A login made while the agent runs is used at once — no
 restart needed.
 
+**The binary must be new enough.** `investviews mcp` is not in v0.2.1 or older. Check with
+`investviews version`. If `investviews mcp --help` says `unknown command "mcp"`, upgrade the binary
+(`brew upgrade --cask Investviews/tap/investviews`, or a newer release tarball). The Claude Code
+plugin registers the server whatever binary you have, so an old binary makes the server fail to
+start.
+
 **Claude Code.** The plugin from step 4 already registers the server. Without the plugin, add it
 with one command:
 
@@ -138,10 +144,13 @@ same filters.
 
 - Every tool description starts with **FREE** or **METERED**, so the agent knows the cost before it
   calls.
-- A metered answer ends with a `cost:` line taken from the quota headers. A free answer has none.
+- A metered answer ends with a `cost:` line taken from the quota headers. A free answer has no
+  cost line when the server marks it uncounted; an answer with no quota headers at all gets
+  `cost: unknown`.
 - Every failure — no token, a bad token, quota spent, a rate limit, a bad argument — comes back as
-  a tool result marked as an error, with a message the agent can show you. A rate limit gives up
-  after about 10 seconds of waiting instead of blocking the chat.
+  a tool result marked as an error, with a message the agent can show you. Waits between retries
+  add up to about 10 seconds at most, and every tool call — `compare_places` with all its places
+  included — is cut off after 30 seconds, so a slow API or a rate limit never blocks the chat.
 - The server sends the agent short instructions with the skill's rules: find the place for free
   first, spend one metered call per question, call every figure a median of asking prices.
 - Standard output carries only protocol messages. Logs go to standard error, which the agent keeps
@@ -176,6 +185,7 @@ either stops to ask permission it does not need, or burns quota it did not have 
 | `geo hexes <geo_id>` | free | list a place's H3 cells (`--ids-only` for a pipe) |
 | `coverage` | free | which markets are served, and how fresh each is |
 | `usage` | free | what this token has spent and has left |
+| `mcp` | free to start (the tools it serves may be metered) | serve the API to an AI agent as MCP tools over stdio — see [Use with MCP](#use-with-mcp) |
 | **`stats current`** | **METERED** | figures for the newest built period |
 | **`stats history`** | **METERED** | the same figures, period by period |
 
@@ -241,6 +251,9 @@ nothing in that window, not an error and not a zero.
 | 2 | money — quota exhausted, or an inactive subscription |
 | 3 | credentials — no token, a bad token, or a read-only token on a write endpoint |
 | 4 | we hold no data for that country at all; retrying never succeeds |
+
+`investviews mcp` exits 0 when the agent closes its standard input. A failed tool call is a tool
+result marked as an error, not an exit code.
 
 ## Install
 

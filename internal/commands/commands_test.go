@@ -150,22 +150,6 @@ func TestAncestryKeepsUnknownApartFromRoot(t *testing.T) {
 		"Madrid (city, R1)")
 }
 
-// ⚠️ A missing figure is an em dash, never a zero: the aggregate held nothing
-// for that field, which is not the number 0.
-func TestNumNeverTurnsAMissingFigureIntoZero(t *testing.T) {
-	if got := num(nil); got != "—" {
-		t.Errorf("num(nil) = %q", got)
-	}
-	zero := 0.0
-	if got := num(&zero); got != "0" {
-		t.Errorf("a real zero must still print: %q", got)
-	}
-	value := 3120.456
-	if got := num(&value); got != "3120.46" {
-		t.Errorf("num = %q", got)
-	}
-}
-
 func TestHexIDsAcceptRepeatsCommasAndStdin(t *testing.T) {
 	cells, err := hexIDs([]string{"1,2", "3"}, nil)
 	if err != nil {

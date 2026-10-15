@@ -2,11 +2,14 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -137,17 +140,12 @@ func TestMCPPipedToolCallGetsItsAnswerBeforeExit(t *testing.T) {
 }
 
 func TestMCPAnswersALastFrameWithNoNewline(t *testing.T) {
+	// Run on the test goroutine: runWithStdin may call t.Fatalf, which is
+	// not allowed elsewhere. A hang here is caught by go test's -timeout.
 	in := strings.NewReader(initializeFrame + "\n" + initializedFrame + "\n" + toolsListFrame)
-	done := make(chan result, 1)
-	go func() { done <- runWithStdin(t, nil, in, "mcp") }()
-
-	select {
-	case res := <-done:
-		if _, ok := frames(t, res.stdout)["2"]; !ok {
-			t.Errorf("no answer to a tools/list sent without a trailing newline\n%s", res.stdout)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("mcp did not exit after stdin ended")
+	res := runWithStdin(t, nil, in, "mcp")
+	if _, ok := frames(t, res.stdout)["2"]; !ok {
+		t.Errorf("no answer to a tools/list sent without a trailing newline\n%s", res.stdout)
 	}
 }
 
@@ -215,33 +213,79 @@ func TestMCPHelpShowsTheAgentConfigLine(t *testing.T) {
 func TestFrameKindTellsRequestsFromResponses(t *testing.T) {
 	cases := []struct {
 		line          string
-		request, resp bool
+		request, resp int
 	}{
-		{`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, true, false},
-		{`{"jsonrpc":"2.0","id":"a","method":"ping"}`, true, false},
-		{`{"jsonrpc":"2.0","method":"notifications/initialized"}`, false, false},
-		{`{"jsonrpc":"2.0","id":null,"method":"x"}`, false, false},
-		{`{"jsonrpc":"2.0","id":1,"result":{}}`, false, true},
-		{`{"jsonrpc":"2.0","id":1,"error":{"code":-32600}}`, false, true},
-		{`[{"jsonrpc":"2.0","id":1,"method":"x"}]`, false, false},
-		{`not json`, false, false},
+		{`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, 1, 0},
+		{`{"jsonrpc":"2.0","id":"a","method":"ping"}`, 1, 0},
+		{`{"jsonrpc":"2.0","method":"notifications/initialized"}`, 0, 0},
+		{`{"jsonrpc":"2.0","id":null,"method":"x"}`, 0, 0},
+		{`{"jsonrpc":"2.0","id":1,"result":{}}`, 0, 1},
+		{`{"jsonrpc":"2.0","id":1,"error":{"code":-32600}}`, 0, 1},
+		// A batch counts each member, so a pending batch call holds the drain.
+		{`[{"jsonrpc":"2.0","id":1,"method":"x"},{"jsonrpc":"2.0","method":"n"},{"jsonrpc":"2.0","id":2,"method":"y"}]`, 2, 0},
+		{`[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"error":{"code":1}}]`, 0, 2},
+		{`[]`, 0, 0},
+		{`[not json`, 0, 0},
+		{`not json`, 0, 0},
 	}
 	for _, c := range cases {
 		req, resp := frameKind([]byte(c.line))
 		if req != c.request || resp != c.resp {
-			t.Errorf("frameKind(%s) = (%v, %v), want (%v, %v)", c.line, req, resp, c.request, c.resp)
+			t.Errorf("frameKind(%s) = (%d, %d), want (%d, %d)", c.line, req, resp, c.request, c.resp)
 		}
 	}
 }
 
 // A request that never gets an answer must not hold the process forever.
 func TestInflightWaitGivesUpAfterTheTimeout(t *testing.T) {
-	f := newInflight(20 * time.Millisecond)
+	const timeout = 50 * time.Millisecond
+	f := newInflight(timeout)
 	f.add(1)
 	start := time.Now()
-	f.wait()
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("wait took %v with a 20ms timeout", elapsed)
+	f.wait(context.Background())
+	elapsed := time.Since(start)
+	if elapsed < timeout {
+		t.Errorf("wait returned after %v, before the %v timeout, with a request still pending", elapsed, timeout)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("wait took %v with a %v timeout", elapsed, timeout)
+	}
+}
+
+// wait returns as soon as the last pending request is answered.
+func TestInflightWaitReturnsWhenThePendingRequestIsAnswered(t *testing.T) {
+	f := newInflight(10 * time.Second)
+	f.add(1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.add(-1)
+	}()
+	start := time.Now()
+	f.wait(context.Background())
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("wait took %v; it should return when pending drops to 0", elapsed)
+	}
+	f.mu.Lock()
+	pending := f.pending
+	f.mu.Unlock()
+	if pending != 0 {
+		t.Errorf("wait returned with pending = %d", pending)
+	}
+}
+
+// Ctrl-C must not sit out the drain timeout.
+func TestInflightWaitStopsWhenTheContextIsDone(t *testing.T) {
+	f := newInflight(10 * time.Second)
+	f.add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	f.wait(ctx)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("wait took %v after the context was cancelled", elapsed)
 	}
 }
 
@@ -257,5 +301,31 @@ func TestInflightCountsFramesSplitAcrossWrites(t *testing.T) {
 	_, _ = w.Write([]byte(`"result":{}}` + "\n"))
 	if f.pending != 0 {
 		t.Errorf("pending = %d after the whole response, want 0", f.pending)
+	}
+}
+
+// A reader may return its last bytes together with io.EOF. Those bytes must
+// reach the SDK at once; the drain waits only on the call after them.
+func TestCountingReaderDeliversBytesReturnedWithEOF(t *testing.T) {
+	f := newInflight(10 * time.Second)
+	r := f.reader(context.Background(), iotest.DataErrReader(strings.NewReader(toolsListFrame+"\n")))
+
+	buf := make([]byte, 4096)
+	start := time.Now()
+	n, err := r.Read(buf)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("the read holding the last request blocked for %v", elapsed)
+	}
+	if err != nil || string(buf[:n]) != toolsListFrame+"\n" {
+		t.Fatalf("first Read = %q, %v; want the frame and no error", buf[:n], err)
+	}
+	if f.pending != 1 {
+		t.Fatalf("pending = %d after the request, want 1", f.pending)
+	}
+
+	f.add(-1) // the SDK answers it
+	n, err = r.Read(buf)
+	if n != 0 || err != io.EOF {
+		t.Errorf("second Read = %d, %v; want 0, io.EOF", n, err)
 	}
 }

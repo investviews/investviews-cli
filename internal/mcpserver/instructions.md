@@ -14,7 +14,9 @@ ONE metered call -> cite the period and the place.
 
 ## Get a geo_id, never invent one
 
-- Only find_place takes a free-text name. Every other tool takes a geo_id a previous result gave.
+- Only find_place takes a free-text name. Every other place argument is a geo_id a previous result
+  gave, an ISO country code, or (place_at_point, market_stats, price_history) coordinates or h3
+  cells.
 - Names repeat ("Centro" exists in ten Spanish cities). Pick by the ancestor chain, never by the
   name. If the question does not say which one, show the chains and ask.
 - An empty browse result is usually the correct answer: levels are skipped, not shifted. Drop the
@@ -28,9 +30,11 @@ Geography results say one of three things:
 - no prices: dead end. Do not spend a metered call.
 
 An empty stats answer is a normal answer, not a price of zero. Its availability reason says what to
-do: no_data_for_selection -> widen the filters; below_minimum_sample or not_determined -> try
-price_history or a wider area; period_not_built -> use price_history; no_data_for_place -> pick
-another place. The reason describes our data, never the market.
+do: no_data_for_selection -> widen the filters; below_minimum_sample -> the whole area is too thin,
+so not wider filters: try price_history or a wider area; not_determined -> try price_history or a
+wider area; period_not_built -> use price_history; no_data_for_place -> nothing in this period under
+any filters: use price_history for the periods its dates name, or over other periods when it names
+none, else pick another place. A null date means nothing in the window the API searched, not nothing ever. Those dates ignore size and price filters, so a named period can still be empty for them. The reason describes our data, never the market.
 
 ## Cite honestly
 

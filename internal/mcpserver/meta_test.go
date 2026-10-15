@@ -213,8 +213,12 @@ func TestMetaToolsReportAnInvalidToken(t *testing.T) {
 			mustContain(t, text, "[invalid_token]")
 			mustContain(t, text, "https://docs.investviews.ai/errors.html#invalid_token")
 			mustContain(t, text, "investviews auth login --token")
-			if res.StructuredContent != nil {
-				t.Errorf("a failed call carries structuredContent: %v", res.StructuredContent)
+			var payload struct {
+				Error toolError `json:"error"`
+			}
+			structured(t, res, &payload)
+			if payload.Error.Code != "invalid_token" || payload.Error.Status != 401 {
+				t.Errorf("structured error = %+v, want invalid_token 401", payload.Error)
 			}
 		})
 	}

@@ -83,8 +83,8 @@ func coverageText(country string, resp *api.CoverageResponse) string {
 
 	for _, row := range resp.Countries {
 		fmt.Fprintf(&b, "- %s — prices: %s, searchable: %s, resolutions: %s, last ad parsed: %s\n",
-			orDash(row.Country), yesNo(row.PricesAvailable), yesNo(row.Searchable),
-			resolutionsText(row.H3Resolutions), lastParsedText(row.LastAdParsedAt))
+			api.Dash(row.Country), api.YesNo(row.PricesAvailable), api.YesNo(row.Searchable),
+			api.Resolutions(row.H3Resolutions), lastParsedText(row.LastAdParsedAt))
 	}
 	b.WriteString("A country code above is a valid geo_id for market_stats. Prices without searchable: reach places by h3 or by coordinate, not by name.\n")
 	return b.String()
@@ -96,24 +96,6 @@ func lastParsedText(v *string) string {
 		return "none — no source targets this market directly, not empty"
 	}
 	return *v
-}
-
-func resolutionsText(values []int) string {
-	if len(values) == 0 {
-		return "—"
-	}
-	parts := make([]string, 0, len(values))
-	for _, v := range values {
-		parts = append(parts, fmt.Sprintf("%d", v))
-	}
-	return strings.Join(parts, ",")
-}
-
-func yesNo(v bool) string {
-	if v {
-		return "yes"
-	}
-	return "no"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +121,7 @@ func (s *server) filters(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}
 // know is still worth showing.
 func filtersText(resp *api.FiltersResponse) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Filter vocabulary %s.\n", orDash(resp.Version))
+	fmt.Fprintf(&b, "Filter vocabulary %s.\n", api.Dash(resp.Version))
 	if note := strings.TrimSpace(resp.RangeSemantics); note != "" {
 		fmt.Fprintf(&b, "ranges: %s\n", note)
 	}
@@ -168,11 +150,6 @@ func filtersText(resp *api.FiltersResponse) string {
 // usage
 // ─────────────────────────────────────────────────────────────────────────────
 
-// groupOrder puts the two groups that cost money first, then the free ones,
-// then any group this build does not know, by name. Same order as the CLI's
-// usage table.
-var groupOrder = map[string]int{"current": 0, "history": 1, "reports": 2, "metadata": 3}
-
 // groupTools names the tools that spend each metered group, so the agent can
 // map "current: 12 left" onto the calls it is about to make.
 var groupTools = map[string]string{
@@ -198,25 +175,11 @@ func usageText(resp *api.UsageResponse) string {
 	if resp.Token.ReadOnly {
 		access = "read-only"
 	}
-	fmt.Fprintf(&b, "Token %q (%s) — %s, %s.\n", resp.Token.Name, orDash(resp.Token.MaskedToken),
-		orDash(resp.Token.Status), access)
+	fmt.Fprintf(&b, "Token %q (%s) — %s, %s.\n", resp.Token.Name, api.Dash(resp.Token.MaskedToken),
+		api.Dash(resp.Token.Status), access)
 
-	names := make([]string, 0, len(resp.Groups))
-	for name := range resp.Groups {
-		names = append(names, name)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		oi, iKnown := groupOrder[names[i]]
-		oj, jKnown := groupOrder[names[j]]
-		switch {
-		case iKnown && jKnown:
-			return oi < oj
-		case iKnown != jKnown:
-			return iKnown
-		default:
-			return names[i] < names[j]
-		}
-	})
+	// Same order as the CLI's usage table: metered groups first.
+	names := resp.SortedGroupNames()
 
 	var degraded bool
 	for _, name := range names {
@@ -229,7 +192,7 @@ func usageText(resp *api.UsageResponse) string {
 			continue
 		}
 		line := fmt.Sprintf("- %s: %s remaining of %s (used %s), resets %s",
-			name, countText(g.Remaining), countText(g.Limit), countText(g.Used), strText(g.ResetsAt))
+			name, api.Count(g.Remaining), api.Count(g.Limit), api.Count(g.Used), api.DashPtr(g.ResetsAt))
 		if tools, known := groupTools[name]; known {
 			line += " — spent by " + tools
 		}
@@ -241,12 +204,4 @@ func usageText(resp *api.UsageResponse) string {
 		b.WriteString("⚠️ degraded: the metering store was unreachable, so these figures are the committed balance alone and may lag. Requests are still served.\n")
 	}
 	return b.String()
-}
-
-// countText renders an optional counter. nil is "unknown", never 0.
-func countText(v *int64) string {
-	if v == nil {
-		return "—"
-	}
-	return fmt.Sprintf("%d", *v)
 }

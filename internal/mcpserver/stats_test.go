@@ -212,7 +212,10 @@ func TestMarketStatsEmptyGivesTheReasonAndTheDates(t *testing.T) {
 	mustContain(t, text, "No figures for this selection in period 2026-08-01. That is a normal answer — not an error, and not a price of zero.")
 	mustContain(t, text, "availability: no_data — no_data_for_selection: This place holds data, but none matched your filters.")
 	mustContain(t, text, "This segment has data from 2025-11-01 to 2026-07-01 (searched back to 2025-09-01).")
-	mustContain(t, text, "What to do: the place holds data, but not for these filters — widen them")
+	mustContain(t, text, "What to do: nothing matched this selection — wider filters")
+	if strings.Contains(text, "the place holds data") {
+		t.Errorf("no_data_for_selection must not claim the place holds data:\n%s", text)
+	}
 	mustContain(t, text, "History goes back to 2024-03-01.")
 	mustContain(t, text, `Next: price_history with geo_id "R344953", or wider filters.`)
 	// res is refused with geo_id, so it must never be suggested here.
@@ -238,7 +241,7 @@ func TestMarketStatsEmptyMovePerReason(t *testing.T) {
 	cases := map[string]string{
 		"period_not_built":     "use price_history",
 		"no_data_for_place":    "pick another place",
-		"below_minimum_sample": "too few listings",
+		"below_minimum_sample": "too few listings in this whole area",
 		"not_determined":       "could not say why",
 		"brand_new_reason":     "could not say why",
 	}
@@ -261,8 +264,40 @@ func TestMarketStatsEmptyMovePerReason(t *testing.T) {
 			if strings.Contains(text, "This segment has data from") {
 				t.Errorf("no date was named, so no range may be printed:\n%s", text)
 			}
-			mustContain(t, text, "No period with data since 2025-09-01")
+			mustContain(t, text, "No period with data in the window the API searched (from 2025-09-01)")
+			// The next call follows the reason. A null date covers only the
+			// searched window, so no_data_for_place still points before it;
+			// and neither it nor below_minimum_sample suggests wider filters.
+			switch reason {
+			case "no_data_for_place":
+				mustContain(t, text, `Next: price_history with geo_id "R344953" (the API named no period with data in the window it searched; other periods may still hold some), or another place — find_place or browse_places.`)
+				if strings.Contains(text, "Do not spend price_history") || strings.Contains(text, "or wider filters") {
+					t.Errorf("no_data_for_place forbids history or suggests wider filters:\n%s", text)
+				}
+			case "below_minimum_sample":
+				mustContain(t, text, `Next: price_history with geo_id "R344953", or a wider area (the parent place). Wider filters will not help`)
+				if strings.Contains(text, "or wider filters") {
+					t.Errorf("below_minimum_sample still suggests wider filters:\n%s", text)
+				}
+			default:
+				mustContain(t, text, `Next: price_history with geo_id "R344953", or wider filters.`)
+			}
 		})
+	}
+}
+
+// no_data_for_selection with no period named: wider filters first, and
+// price_history without a bound — a null date covers only the searched
+// window, never all history.
+func TestMarketStatsEmptySelectionWithoutDataSuggestsFiltersThenEarlierHistory(t *testing.T) {
+	body := strings.Replace(emptyReply, `"earliest_nonempty_period":"2025-11-01"`, `"earliest_nonempty_period":null`, 1)
+	body = strings.Replace(body, `"latest_nonempty_period":"2026-07-01"`, `"latest_nonempty_period":null`, 1)
+	session, _ := connectFake(t, meteredJSON(body))
+
+	text := textOf(t, callTool(t, session, "market_stats", map[string]any{"geo_id": "R344953"}))
+	mustContain(t, text, `Next: wider filters, or price_history with geo_id "R344953" (the API named no period with data in the window it searched; other periods may still hold some).`)
+	if strings.Contains(text, "to before") {
+		t.Errorf("a null date must not bound price_history to before searched_from (pooled res 7-8 figures are not covered):\n%s", text)
 	}
 }
 
@@ -565,6 +600,32 @@ func TestPriceHistoryGivesOneLinePerPeriod(t *testing.T) {
 	mustContain(t, text, "cost: 1 metered request (group history, 12 of 5000 used this cycle)")
 }
 
+// Each history point carries its own bin_approximations: the requested
+// filters are not the bounds a figure describes. Bounds shared by every point
+// are said once; bounds that differ are said under each period.
+func TestPriceHistoryStatesBinApproximations(t *testing.T) {
+	approx := `"bin_approximations":{"price_usd":{"requested":[0,300000],"effective":[0,312000]}},`
+	shared := strings.ReplaceAll(historyReply, `"stats":[`, approx+`"stats":[`)
+	session, _ := connectFake(t, historyJSON(shared))
+	text := textOf(t, callTool(t, session, "price_history", map[string]any{"geo_id": "R344953"}))
+	if n := strings.Count(text, `price_usd {"requested":[0,300000],"effective":[0,312000]}`); n != 1 {
+		t.Errorf("shared bounds said %d times, want once:\n%s", n, text)
+	}
+	mustContain(t, text, "EFFECTIVE bounds")
+
+	// Only the second period moved its bound: each period line says its own.
+	other := `"bin_approximations":{"price_usd":{"requested":[0,300000],"effective":[0,295000]}},`
+	mixed := strings.Replace(historyReply, `"stats":[`, approx+`"stats":[`, 1)
+	i := strings.Index(mixed, `"period":"2026-07-01"`)
+	mixed = mixed[:i] + strings.Replace(mixed[i:], `"stats":[`, other+`"stats":[`, 1)
+	session, _ = connectFake(t, historyJSON(mixed))
+	text = textOf(t, callTool(t, session, "price_history", map[string]any{"geo_id": "R344953"}))
+	mustContain(t, text, "median size: 91 m²\n  ⚠️ size/price ranges are applied at bin edges, not exactly (requested → effective): "+
+		`price_usd {"requested":[0,300000],"effective":[0,312000]}`)
+	mustContain(t, text, "low confidence\n  ⚠️ size/price ranges are applied at bin edges, not exactly (requested → effective): "+
+		`price_usd {"requested":[0,300000],"effective":[0,295000]}`)
+}
+
 // A period holding several cells has no single figure: the text says so and
 // points at the payload instead of averaging the cells.
 func TestPriceHistoryMultiCellPeriodIsNotAveraged(t *testing.T) {
@@ -588,6 +649,30 @@ func TestPriceHistoryMultiCellPeriodIsNotAveraged(t *testing.T) {
 	if strings.Contains(text, "3500") {
 		t.Errorf("text averaged the cells:\n%s", text)
 	}
+}
+
+// A multi-cell territory whose periods each hold one row may hold a DIFFERENT
+// cell in each: every line names its cell, and a warning says not to read
+// the lines as one trend.
+func TestPriceHistoryMultiCellSingleRowsNameTheirCell(t *testing.T) {
+	reply := `{"currency":"USD","territory":{"selector":"point","hex_count":7,"grain":"h3"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy"},
+	 "series":[
+	  {"period":"2026-07-01","granularity":"month","window_start":"2026-07-01","window_end":"2026-07-31",
+	   "as_of":"2026-07-31","stats":[{"h3":"871f1d489ffffff","name":"Ruzafa","median_price_per_sqm":3000}]},
+	  {"period":"2026-08-01","granularity":"month","window_start":"2026-08-01","window_end":"2026-08-31",
+	   "as_of":"2026-08-31","stats":[{"h3":"871f1d48bffffff","name":"Benimaclet","median_price_per_sqm":4000}]}],
+	 "series_note":"","snapshot":{}}`
+	session, _ := connectFake(t, historyJSON(reply))
+
+	res := callTool(t, session, "price_history", map[string]any{"lat": 39.47, "lng": -0.376, "radius_km": 2})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "⚠️ SEVERAL CELLS")
+	mustContain(t, text, "as_of 2026-07-31): cell Ruzafa (h3 871f1d489ffffff): median asking price per m²: 3000 USD")
+	mustContain(t, text, "as_of 2026-08-31): cell Benimaclet (h3 871f1d48bffffff): median asking price per m²: 4000 USD")
 }
 
 // An empty series is a normal answer with the API's reason and the way back
@@ -720,4 +805,104 @@ func TestPriceHistoryIsAnnouncedMetered(t *testing.T) {
 		return
 	}
 	t.Fatal("price_history is not in tools/list")
+}
+
+// Any other 422 from /stats/history is the range refusal, even when the
+// server names no parameter.
+func TestPriceHistoryOther422SaysSplitIt(t *testing.T) {
+	session, _ := connectFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		historyHeaders(w)
+		writeBody(w, http.StatusUnprocessableEntity, `{"error":"invalid_parameter",`+
+			`"message":"The range is too long.","docs_url":"d"}`)
+	})
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953", "from": "2020-01"})
+	if !res.IsError {
+		t.Fatalf("a 422 must come back with isError, got: %s", textOf(t, res))
+	}
+	mustContain(t, textOf(t, res), "Split from..to")
+}
+
+// ⚠️ A 400 naming from is a bad value, not a long range: the agent must fix
+// the date, not split a range that was never too long.
+func TestPriceHistoryBadDateIsNotARangeError(t *testing.T) {
+	session, _ := connectFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		historyHeaders(w)
+		writeBody(w, http.StatusBadRequest, `{"error":"invalid_parameter",`+
+			`"message":"from is not a date: 2026-13.","parameter":"from","docs_url":"d"}`)
+	})
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953", "from": "2026-13"})
+	if !res.IsError {
+		t.Fatalf("a 400 must come back with isError, got: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "from is not a date: 2026-13.")
+	if strings.Contains(text, "Split from..to") {
+		t.Errorf("a bad date was told to split the range:\n%s", text)
+	}
+}
+
+// A malformed cell id is refused locally, in the tool's words: no shell pipe,
+// no CLI command, no request.
+func TestStatsToolsRefuseABadCellInToolWords(t *testing.T) {
+	for _, tool := range []string{"market_stats", "price_history"} {
+		t.Run(tool, func(t *testing.T) {
+			session, fake := connectFake(t, nil)
+			res := callTool(t, session, tool, map[string]any{"h3": []string{"R1"}})
+			if !res.IsError {
+				t.Fatalf("a bad cell id must come back with isError, got: %s", textOf(t, res))
+			}
+			if fake.hits() != 0 {
+				t.Errorf("sent %d requests, want 0", fake.hits())
+			}
+			text := textOf(t, res)
+			mustContain(t, text, "place_at_point")
+			mustContain(t, text, "cost no quota")
+			if strings.Contains(text, "investviews") || strings.Contains(text, "--") {
+				t.Errorf("error text names a CLI command or flag:\n%s", text)
+			}
+		})
+	}
+}
+
+// no_data_for_place is about THIS period: when the availability names periods
+// that hold data, price_history over them is the move — never wider filters.
+func TestMarketStatsNoDataForPlaceWithDatesSuggestsHistory(t *testing.T) {
+	body := strings.Replace(emptyReply, `"no_data_for_selection"`, `"no_data_for_place"`, 1)
+	session, _ := connectFake(t, meteredJSON(body))
+
+	text := textOf(t, callTool(t, session, "market_stats", map[string]any{"geo_id": "R344953"}))
+	mustContain(t, text, "This segment has data from 2025-11-01 to 2026-07-01")
+	mustContain(t, text, "in this period, under any filters")
+	mustContain(t, text, `Next: price_history with geo_id "R344953" for the periods named above, or another place`)
+	if strings.Contains(text, "Do not spend price_history") {
+		t.Errorf("no_data_for_place with data periods still forbids price_history:\n%s", text)
+	}
+	if strings.Contains(text, "or wider filters") {
+		t.Errorf("no_data_for_place must not suggest wider filters:\n%s", text)
+	}
+}
+
+// The API's note on the availability dates — size and price filters are not
+// applied to them — is printed beside the dates.
+func TestMarketStatsAvailabilityNoteIsPrinted(t *testing.T) {
+	body := strings.Replace(emptyReply, `"rooms":["5+"]},"note":""`,
+		`"rooms":["5+"]},"note":"min_size, max_size, min_price_usd and max_price_usd are not applied to these dates."`, 1)
+	session, _ := connectFake(t, meteredJSON(body))
+
+	text := textOf(t, callTool(t, session, "market_stats", map[string]any{"geo_id": "R344953", "min_price_usd": 500000}))
+	mustContain(t, text, "This segment has data from 2025-11-01 to 2026-07-01")
+	mustContain(t, text, "Note: min_size, max_size, min_price_usd and max_price_usd are not applied to these dates.")
+}
+
+// market_stats states the effective bin bounds of a size or price range.
+func TestMarketStatsStatesBinApproximations(t *testing.T) {
+	body := strings.Replace(emptyReply, `"stats":[]`,
+		`"bin_approximations":{"size_m2":{"requested":[50,100],"effective":[48,105]}}, "stats":[]`, 1)
+	session, _ := connectFake(t, meteredJSON(body))
+
+	text := textOf(t, callTool(t, session, "market_stats", map[string]any{"geo_id": "R344953", "min_size": 50, "max_size": 100}))
+	mustContain(t, text, `size_m2 {"requested":[50,100],"effective":[48,105]}`)
+	mustContain(t, text, "EFFECTIVE bounds")
 }

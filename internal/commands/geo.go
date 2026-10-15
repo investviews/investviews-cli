@@ -149,7 +149,7 @@ whether spending a metered stats call on it can pay off at all.`,
 func renderBrowse(w io.Writer, parentFlag, level string, resp *api.GeoResponse) {
 	fmt.Fprintln(w, browseHeader(parentFlag, level, resp.Parent))
 	if resp.Parent != nil {
-		fmt.Fprintf(w, "parent: %s (%s, %s)\n", resp.Parent.Name, dash(resp.Parent.Level), resp.Parent.GeoID)
+		fmt.Fprintf(w, "parent: %s (%s, %s)\n", resp.Parent.Name, api.Dash(resp.Parent.Level), resp.Parent.GeoID)
 		fmt.Fprintf(w, "  in: %s\n", ancestry(resp.Parent.Ancestors))
 	}
 	fmt.Fprintln(w)
@@ -165,7 +165,7 @@ func renderBrowse(w io.Writer, parentFlag, level string, resp *api.GeoResponse) 
 		fmt.Fprintln(tw, "GEO_ID\tLEVEL\tNAME\tAVAILABILITY")
 		for _, row := range resp.Results {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-				row.GeoID, dash(row.Level), row.Name, availability(row.PricesAvailable, row.HasData, row.CurrentPeriod))
+				row.GeoID, api.Dash(row.Level), row.Name, availability(row.PricesAvailable, row.HasData, row.CurrentPeriod))
 		}
 	})
 }
@@ -325,14 +325,14 @@ func renderSearch(w io.Writer, query string, resp *api.SearchResponse) {
 	fmt.Fprintln(w)
 
 	for i, hit := range resp.Results {
-		fmt.Fprintf(w, "%d. %s — %s, %s\n", i+1, hit.Name, dash(hit.Level), dash(hit.Country))
-		fmt.Fprintf(w, "   geo_id: %s\n", dash(hit.GeoID))
+		fmt.Fprintf(w, "%d. %s — %s, %s\n", i+1, hit.Name, api.Dash(hit.Level), api.Dash(hit.Country))
+		fmt.Fprintf(w, "   geo_id: %s\n", api.Dash(hit.GeoID))
 		fmt.Fprintf(w, "   in:     %s\n", ancestry(hit.Ancestors))
 		if hit.IsPoint() {
 			// The tree missed and the geocoder answered: a coordinate, not
 			// a place in the hierarchy.
 			fmt.Fprintf(w, "   point:  %s, %s (geocoder fallback, source %s)\n",
-				num(hit.Lat), num(hit.Lng), dash(hit.Source))
+				api.Num(hit.Lat), api.Num(hit.Lng), api.Dash(hit.Source))
 		}
 		fmt.Fprintf(w, "   %s\n", availability(hit.PricesAvailable, hit.HasData, hit.CurrentPeriod))
 	}
@@ -355,8 +355,8 @@ func renderSearchMiss(w io.Writer, query string, err *api.UnknownPlaceError) {
 	fmt.Fprintf(w, "\nDid you mean one of these %d? Each carries a geo_id you can spend straight away.\n\n",
 		len(err.DidYouMean))
 	for i, hit := range err.DidYouMean {
-		fmt.Fprintf(w, "%d. %s — %s, %s\n", i+1, dash(hit.Name), dash(hit.Level), dash(hit.Country))
-		fmt.Fprintf(w, "   geo_id: %s\n", dash(hit.GeoID))
+		fmt.Fprintf(w, "%d. %s — %s, %s\n", i+1, api.Dash(hit.Name), api.Dash(hit.Level), api.Dash(hit.Country))
+		fmt.Fprintf(w, "   geo_id: %s\n", api.Dash(hit.GeoID))
 		fmt.Fprintf(w, "   in:     %s\n", ancestry(hit.Ancestors))
 	}
 	fmt.Fprintln(w)
@@ -430,8 +430,8 @@ those zones carry no geo_id to spend.`,
 
 func renderPoint(w io.Writer, point *api.Point) {
 	fmt.Fprintf(w, "Cell %s (res %d) at %s, %s — source %s\n",
-		dash(point.H3), point.H3Res, num(&point.Lat), num(&point.Lng), dash(point.Source))
-	fmt.Fprintf(w, "%s (%s)\n", str(point.DisplayName), str(point.Country))
+		api.Dash(point.H3), point.H3Res, api.Num(&point.Lat), api.Num(&point.Lng), api.Dash(point.Source))
+	fmt.Fprintf(w, "%s (%s)\n", api.DashPtr(point.DisplayName), api.DashPtr(point.Country))
 	fmt.Fprintf(w, "%s\n", availabilityForPoint(point))
 	fmt.Fprintln(w)
 
@@ -449,7 +449,7 @@ func renderPoint(w io.Writer, point *api.Point) {
 				geoID = *zone.GeoID
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				dash(zone.Level), zone.Name, geoID, dataNow(zone.HasData, zone.CurrentPeriod), ancestry(zone.Ancestors))
+				api.Dash(zone.Level), zone.Name, geoID, dataNow(zone.HasData, zone.CurrentPeriod), ancestry(zone.Ancestors))
 		}
 	})
 }
@@ -637,7 +637,7 @@ func renderHexes(w io.Writer, page *api.HexPage, complete bool) {
 		scope = "every page"
 	}
 	fmt.Fprintf(w, "%s %s (%s, %s) — %d cell(s) at res %d, %s\n",
-		dash(page.GeoID), page.Name, dash(page.Level), dash(page.Country), len(page.Hexes), page.H3Res, scope)
+		api.Dash(page.GeoID), page.Name, api.Dash(page.Level), api.Dash(page.Country), len(page.Hexes), page.H3Res, scope)
 	fmt.Fprintf(w, "%s\n", availability(page.PricesAvailable, nil, api.NullableDate{}))
 	fmt.Fprintln(w)
 

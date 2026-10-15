@@ -1,10 +1,11 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"math"
-	"strconv"
+	"sort"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -12,8 +13,9 @@ import (
 	"github.com/investviews/investviews-cli/internal/api"
 )
 
-// The metered stats tools: market_stats and price_history. They are the only tools that spend quota, and the
-// only ones whose answers a user will quote — so their text names the
+// The metered stats tools: market_stats and price_history. With compare_places
+// they are the only tools that spend quota, and the only ones whose answers a
+// user will quote — so their text names the
 // statistic every time, and an empty answer says WHY it is empty.
 //
 // ⚠️ EVERY FIGURE IS A MEDIAN OF ASKING PRICES. Not a sale price, not the price
@@ -21,10 +23,10 @@ import (
 // "median asking price" and "median size" — never "price" — because an agent
 // copies the words it was given, and the user reads them as a valuation.
 //
-// The argument structs are built from two halves so the later stats tools
-// reuse them: territoryArgs (WHERE — one of three selectors) and
-// statsFilterArgs (WHICH listings). market_stats and price_history take both;
-// compare_places takes a list of geo_ids and the filters alone.
+// The argument structs are built from two halves: territoryArgs (WHERE — one
+// of three selectors) and statsFilterArgs (WHICH listings). market_stats and
+// price_history take both; compare_places takes a list of geo_ids and the
+// filters alone.
 
 func (s *server) registerStats(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
@@ -146,6 +148,33 @@ func (t territoryArgs) selectorText(territory api.Territory) string {
 	}
 }
 
+// checkCells refuses a malformed h3 cell id in the tool's own words, before
+// any request.
+//
+// ⚠️ api.ValidateH3Cells SAYS THE SAME THING IN THE CLI'S WORDS: it points at
+// `investviews geo hexes … | investviews stats current --h3 -`, a shell pipe
+// and a command with no tool. An agent told that either shells out or gives
+// up. So the MCP layer checks first and names place_at_point instead.
+//
+// It runs only when h3 is the ONE selector: a request naming two is told by
+// the api layer to drop one, not lectured about the one it may drop.
+func checkCells(p api.StatsParams) error {
+	if len(p.H3) == 0 || p.GeoID != "" || p.Lat != nil || p.Lng != nil || p.RadiusKm != nil {
+		return nil
+	}
+	for _, cell := range p.H3 {
+		if _, err := api.ParseH3Cell(cell); err != nil {
+			return &api.ValidationError{
+				Parameter: "h3",
+				Message: fmt.Sprintf("%v. Each h3 entry must be a decimal uint64 (613498076398616575) "+
+					"or a canonical H3 string (8839540ad1fffff), exactly as place_at_point returns it. "+
+					"Nothing was sent, so this cost no quota", err),
+			}
+		}
+	}
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // market_stats
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +188,9 @@ func (s *server) marketStats(ctx context.Context, _ *mcp.CallToolRequest, args m
 	params := args.territoryArgs.params()
 	args.statsFilterArgs.apply(&params)
 
+	if err := checkCells(params); err != nil {
+		return fail(err)
+	}
 	c, err := s.client()
 	if err != nil {
 		return fail(err)
@@ -182,21 +214,23 @@ func currentText(args territoryArgs, resp *api.CurrentStats) string {
 	b.WriteString(territoryText(resp.Territory))
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "period %s (%s) · window %s → %s · as_of %s · figures in %s (fx %s)\n",
-		strText(resp.Period), orDash(resp.Granularity), strText(resp.WindowStart), strText(resp.WindowEnd),
-		strText(resp.AsOf), orDash(resp.Currency), strText(resp.FxDate))
+		api.DashPtr(resp.Period), api.Dash(resp.Granularity), api.DashPtr(resp.WindowStart), api.DashPtr(resp.WindowEnd),
+		api.DashPtr(resp.AsOf), api.Dash(resp.Currency), api.DashPtr(resp.FxDate))
 	b.WriteString(appliedFiltersText(resp.Filters))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString(binApproxText(resp.BinApproximations))
+	b.WriteString("\n")
 
 	if len(resp.Stats) == 0 {
 		fmt.Fprintf(&b, "No figures for this selection in period %s. That is a normal answer — not an error, and not a price of zero.\n",
-			strText(resp.Period))
+			api.DashPtr(resp.Period))
 		if resp.Availability != nil {
 			b.WriteString(availabilityText(resp.Availability))
 		}
 		if resp.Snapshot.EarliestPeriod != "" {
 			fmt.Fprintf(&b, "History goes back to %s.\n", resp.Snapshot.EarliestPeriod)
 		}
-		b.WriteString(emptyMovesText(args, resp.Territory))
+		b.WriteString(emptyMovesText(args, resp.Territory, resp.Availability))
 		return b.String()
 	}
 
@@ -217,13 +251,92 @@ func currentText(args territoryArgs, resp *api.CurrentStats) string {
 const medianNote = "Every figure is a median of ASKING prices of listings in this place and period — " +
 	"not a sale price, not one flat's price. Quote it as \"median asking price\", never as \"price\"."
 
-// emptyMovesText names the next calls that can succeed for THIS selector.
+// emptyMovesText names the next calls that can succeed for THIS selector,
+// chosen by the availability reason, so it never contradicts the "What to do"
+// line above it and never sends the agent into a metered call that cannot
+// answer.
+//
+//   - no_data_for_place: wider filters never (the place holds nothing in
+//     this period under ANY filters). price_history over the periods the
+//     availability names, or — when it names none — without a bound (the
+//     dates cover only the searched window); and another place.
+//   - below_minimum_sample: wider filters never (the TERRITORY's whole
+//     population for the window is under the publication floor, and every
+//     selection inside it is smaller still). price_history, or a wider
+//     territory: the parent place, or a coarser res for the circle.
+//   - no_data_for_selection: wider filters, and price_history over the
+//     periods the availability names, or — when it names none — without a
+//     bound.
+//   - period_not_built, not_determined (and no availability at all, from an
+//     older server): price_history, a coarser res for the circle, and wider
+//     filters.
+//
+// ⚠️ A NULL DATE IS NOT "NOTHING, EVER". The availability dates cover only
+// the window the API searched (from searched_from; for price_history, up to
+// its to), so with no date named another period can still hold data. The
+// move says so and does not bound the call: pooled figures at res 7-8 are
+// not covered by the dates either.
+//
 // "A coarser res" only for the circle: res is refused with geo_id and h3, and
 // a hint naming an argument the tool then refuses sends the agent into an
 // error it did not cause.
-func emptyMovesText(args territoryArgs, territory api.Territory) string {
+func emptyMovesText(args territoryArgs, territory api.Territory, avail *api.Availability) string {
+	reason := "not_determined"
+	if avail != nil {
+		reason = avail.ReasonOrUnknown()
+	}
+	dated := avail != nil && (avail.EarliestNonemptyPeriod != nil || avail.LatestNonemptyPeriod != nil)
+	sel := args.selectorText(territory)
+
+	// earlierHistory is price_history for a reason whose dates came back
+	// null. It states only what the API reported — no period named in the
+	// window it searched — and puts no bound on the call: the dates do not
+	// cover other periods, nor the pooled figures at res 7-8.
+	earlierHistory := func() string {
+		return "price_history with " + sel + " (the API named no period with data in the window it searched; other periods may still hold some)"
+	}
+
+	switch reason {
+	case "no_data_for_place":
+		const tail = "another place — find_place or browse_places. Wider filters will not help in this period.\n"
+		switch {
+		case sel == "":
+			return "Next: " + tail
+		case dated:
+			return "Next: price_history with " + sel + " for the periods named above, or " + tail
+		default:
+			return "Next: " + earlierHistory() + ", or " + tail
+		}
+	case "below_minimum_sample":
+		var moves []string
+		if sel != "" {
+			moves = append(moves, "price_history with "+sel)
+		}
+		if args.isCircle() {
+			moves = append(moves, "a coarser res")
+		} else {
+			moves = append(moves, "a wider area (the parent place)")
+		}
+		return "Next: " + strings.Join(moves, ", or ") + ". Wider filters will not help: the whole area is under the publication threshold.\n"
+	case "no_data_for_selection":
+		var moves []string
+		if sel != "" && dated {
+			moves = append(moves, "price_history with "+sel)
+		}
+		if args.isCircle() {
+			moves = append(moves, "a coarser res")
+		}
+		moves = append(moves, "wider filters")
+		// No period named: the filters are the likelier cause, so they come
+		// first, and the earlier periods last.
+		if sel != "" && !dated {
+			moves = append(moves, earlierHistory())
+		}
+		return "Next: " + strings.Join(moves, ", or ") + ".\n"
+	}
+
 	var moves []string
-	if sel := args.selectorText(territory); sel != "" {
+	if sel != "" {
 		moves = append(moves, "price_history with "+sel)
 	}
 	if args.isCircle() {
@@ -260,6 +373,9 @@ func (s *server) priceHistory(ctx context.Context, _ *mcp.CallToolRequest, args 
 	}
 	args.statsFilterArgs.apply(&params.StatsParams)
 
+	if err := checkCells(params.StatsParams); err != nil {
+		return fail(err)
+	}
 	c, err := s.client()
 	if err != nil {
 		return fail(err)
@@ -284,15 +400,15 @@ var splitRangeNote = fmt.Sprintf("price_history answers at most %d periods per c
 //
 // ⚠️ THE CONTRACT GIVES THIS REFUSAL NO CODE OF ITS OWN. It is a 422 that is
 // neither too_many_hexes (the cell budget, with its own hint) nor a report
-// code, so it is recognised by status plus "not one of those" — or by the
-// parameter it names, when the server names from or to.
+// code, so it is recognised by status plus "not one of those".
+//
+// ⚠️ ONLY A 422. A 400 invalid_parameter naming from or to (a malformed date
+// such as 2025-13, or from after to) is a value to fix, and telling the agent
+// to split the range would send it splitting a range that was never too long.
 func rangeRefused(err error) bool {
 	apiErr, isAPI := api.AsAPIError(err)
 	if !isAPI {
 		return false
-	}
-	if apiErr.Parameter == "from" || apiErr.Parameter == "to" {
-		return true
 	}
 	return apiErr.Status == 422 &&
 		apiErr.Code != api.CodeTooManyHexes &&
@@ -303,9 +419,14 @@ func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
 	var b strings.Builder
 	b.WriteString(territoryText(resp.Territory))
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "%d period(s) · figures in %s\n", len(resp.Series), orDash(resp.Currency))
+	fmt.Fprintf(&b, "%d period(s) · figures in %s\n", len(resp.Series), api.Dash(resp.Currency))
 	b.WriteString(appliedFiltersText(resp.Filters))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	// The bounds a period really used. One line when every period used the
+	// same ones; otherwise each period line carries its own.
+	sharedApprox, perPoint := historyBinApprox(resp.Series)
+	b.WriteString(sharedApprox)
+	b.WriteString("\n")
 
 	if len(resp.Series) == 0 {
 		b.WriteString("No periods in this range. That is a normal answer — not an error, and not a price of zero.\n")
@@ -321,8 +442,19 @@ func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
 
 	b.WriteString(medianNote)
 	b.WriteString("\n\n")
+	multiCell := resp.Territory.HexCount > 1 || distinctCells(resp.Series) > 1
+	if multiCell {
+		b.WriteString("⚠️ SEVERAL CELLS — a period with one row is ONE cell, and another period may be a different cell. " +
+			"Each line names its cell; compare a period only with periods of the same h3, never read the lines as one trend.\n")
+	}
 	for i, point := range resp.Series {
-		b.WriteString(historyPointText(i, point, resp.Currency))
+		b.WriteString(historyPointText(i, point, resp.Currency, multiCell))
+		if perPoint {
+			if approx := binApproxText(point.BinApproximations); approx != "" {
+				b.WriteString("  ")
+				b.WriteString(approx)
+			}
+		}
 	}
 
 	// A series whose every period came back empty is a column of dashes; the
@@ -340,15 +472,35 @@ func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
 	return b.String()
 }
 
+// historyBinApprox states the size and price bounds each period really used.
+// Every point carries its own bin_approximations, and the requested filters
+// printed above are NOT the bounds the figures describe. When every point
+// sent the same bounds (or none sent any), they are said once and perPoint is
+// false; otherwise shared is "" and each period line carries its own.
+func historyBinApprox(series []api.HistoryPoint) (shared string, perPoint bool) {
+	if len(series) == 0 {
+		return "", false
+	}
+	first := binApproxText(series[0].BinApproximations)
+	for _, point := range series[1:] {
+		if binApproxText(point.BinApproximations) != first {
+			return "", true
+		}
+	}
+	return first, false
+}
+
 // historyPointText is one line per period, led by the period and its window
 // so the agent cites WHICH window a figure describes.
 //
 // ⚠️ ONE LINE IS ONLY HONEST WHILE A PERIOD HOLDS ONE ROW. A multi-cell series
 // has no single figure per period, and averaging the cells here would invent
-// one — so such a period names its row count and points at the payload.
-func historyPointText(i int, point api.HistoryPoint, currency string) string {
-	head := fmt.Sprintf("- %s (%s, window %s → %s, as_of %s)", orDash(point.Period), orDash(point.Granularity),
-		orDash(point.WindowStart), orDash(point.WindowEnd), orDash(point.AsOf))
+// one — so such a period names its row count and points at the payload. And
+// when the territory spans several cells, a period's one row is still only
+// one of them, so multiCell makes the line name which.
+func historyPointText(i int, point api.HistoryPoint, currency string, multiCell bool) string {
+	head := fmt.Sprintf("- %s (%s, window %s → %s, as_of %s)", api.Dash(point.Period), api.Dash(point.Granularity),
+		api.Dash(point.WindowStart), api.Dash(point.WindowEnd), api.Dash(point.AsOf))
 	switch len(point.Stats) {
 	case 0:
 		if point.Availability != nil {
@@ -356,20 +508,32 @@ func historyPointText(i int, point api.HistoryPoint, currency string) string {
 		}
 		return head + ": no figures\n"
 	case 1:
-		row := point.Stats[0]
-		mark := ""
-		if row.Estimated {
-			mark = "~ "
+		if multiCell {
+			return fmt.Sprintf("%s: %s: %s\n", head, cellText(point.Stats[0]), figureLine(point.Stats[0], currency))
 		}
-		line := fmt.Sprintf("%s: %s%s", head, mark, strings.Join(coreFigures(row, currency), " · "))
-		if row.LowConfidence != nil && *row.LowConfidence {
-			line += " · low confidence"
-		}
-		return line + "\n"
+		return fmt.Sprintf("%s: %s\n", head, figureLine(point.Stats[0], currency))
 	default:
 		return fmt.Sprintf("%s: %d cells — no single figure for the period; per-cell figures in structuredContent.series[%d].stats\n",
 			head, len(point.Stats), i)
 	}
+}
+
+// cellText names the one cell a period's row describes: its label and h3.
+func cellText(row api.Stat) string {
+	return fmt.Sprintf("cell %s (h3 %s)", api.DashPtr(row.Name), api.Dash(row.H3))
+}
+
+// distinctCells counts the different h3 cells across every period's rows.
+func distinctCells(series []api.HistoryPoint) int {
+	seen := map[string]bool{}
+	for _, point := range series {
+		for _, row := range point.Stats {
+			if row.H3 != "" {
+				seen[row.H3] = true
+			}
+		}
+	}
+	return len(seen)
 }
 
 // anyPointRows reports whether any period of a series carries a figure.
@@ -398,13 +562,20 @@ func seriesFootnotes(series []api.HistoryPoint) string {
 // words — shared by market_stats, price_history and compare_places
 // ─────────────────────────────────────────────────────────────────────────────
 
+// territoryText, appliedFiltersText and statFootnotes look like the CLI's
+// territoryLine, filtersLine and renderStatFootnotes, and stay separate ON
+// PURPOSE. The wording differs: the CLI writes for a person at a terminal,
+// these write for an agent that copies the words into its answer ("asking
+// price" not "price", "~" for estimated rows). Only the value formatters are
+// shared (internal/api/format.go).
+
 // territoryText is the territory as the server echoed it: what was ACTUALLY
 // asked about, which is what the agent must cite.
 func territoryText(t api.Territory) string {
 	var b strings.Builder
 	switch {
 	case t.Place != nil:
-		fmt.Fprintf(&b, "%s (%s, %s)", orDash(t.Place.Name), orDash(t.Place.Level), orDash(t.Place.Country))
+		fmt.Fprintf(&b, "%s (%s, %s)", api.Dash(t.Place.Name), api.Dash(t.Place.Level), api.Dash(t.Place.Country))
 		if t.GeoID != "" {
 			fmt.Fprintf(&b, " — geo_id %s", t.GeoID)
 		}
@@ -418,7 +589,7 @@ func territoryText(t api.Territory) string {
 	default:
 		fmt.Fprintf(&b, "%d cell(s)", t.HexCount)
 	}
-	fmt.Fprintf(&b, " · selector %s", orDash(t.Selector))
+	fmt.Fprintf(&b, " · selector %s", api.Dash(t.Selector))
 	if t.Resolution != nil {
 		fmt.Fprintf(&b, " · res %d", *t.Resolution)
 	}
@@ -433,15 +604,15 @@ func territoryText(t api.Territory) string {
 // difference between a sale price and a monthly rent.
 func appliedFiltersText(f api.Filters) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "filters: %s / %s", orDash(f.AdType), orDash(f.AdSubType))
+	fmt.Fprintf(&b, "filters: %s / %s", api.Dash(f.AdType), api.Dash(f.AdSubType))
 	if len(f.Rooms) > 0 {
 		fmt.Fprintf(&b, " · rooms %s", strings.Join(f.Rooms, ","))
 	}
 	if f.MinSize != nil || f.MaxSize != nil {
-		fmt.Fprintf(&b, " · size %s..%s m²", numText(f.MinSize), numText(f.MaxSize))
+		fmt.Fprintf(&b, " · size %s..%s m²", api.Num(f.MinSize), api.Num(f.MaxSize))
 	}
 	if f.MinPriceUSD != nil || f.MaxPriceUSD != nil {
-		fmt.Fprintf(&b, " · asking price %s..%s USD", numText(f.MinPriceUSD), numText(f.MaxPriceUSD))
+		fmt.Fprintf(&b, " · asking price %s..%s USD", api.Num(f.MinPriceUSD), api.Num(f.MaxPriceUSD))
 	}
 	b.WriteString(" · price filters are USD whatever the display currency is")
 	return b.String()
@@ -452,7 +623,7 @@ func appliedFiltersText(f api.Filters) string {
 // and the quality flags.
 func statRowText(row api.Stat, currency string) string {
 	var b strings.Builder
-	name := strText(row.Name)
+	name := api.DashPtr(row.Name)
 	if row.Estimated {
 		// "~" is the mark the instructions tell the agent to carry into
 		// its answer for anything that is not the place's own figure.
@@ -490,6 +661,21 @@ func coreFigures(row api.Stat, currency string) []string {
 	}
 }
 
+// figureLine is the core figures on one line, for a history period or a
+// comparison row: "~ " first when the row is estimated, and the low-confidence
+// flag last when it is stamped.
+func figureLine(row api.Stat, currency string) string {
+	mark := ""
+	if row.Estimated {
+		mark = "~ "
+	}
+	line := mark + strings.Join(coreFigures(row, currency), " · ")
+	if row.LowConfidence != nil && *row.LowConfidence {
+		line += " · low confidence"
+	}
+	return line
+}
+
 // statNotes renders the two quality flags.
 //
 // ⚠️ low_confidence ABSENT IS NOT FALSE — the API stamps it only where a
@@ -522,6 +708,34 @@ func statFootnotes(stats []api.Stat) string {
 	return b.String()
 }
 
+// binApproxText states the size and price bounds the server really applied.
+// Size and price are stored as bins, so a requested bound is moved to a bin
+// edge: a figure asked for "under $300k" may cover listings up to the next
+// edge. The answer cites the effective bounds, not the requested ones. The
+// objects are passed through as the server sent them (requested and
+// effective bounds per range). "" when the server sent none.
+func binApproxText(approx map[string]json.RawMessage) string {
+	if len(approx) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(approx))
+	for k := range approx {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		var compact bytes.Buffer
+		raw := string(approx[k])
+		if json.Compact(&compact, approx[k]) == nil {
+			raw = compact.String()
+		}
+		parts = append(parts, k+" "+raw)
+	}
+	return "⚠️ size/price ranges are applied at bin edges, not exactly (requested → effective): " +
+		strings.Join(parts, "; ") + ". Describe the population by the EFFECTIVE bounds.\n"
+}
+
 // availabilityText is the API's own answer to "why is this empty", and WHEN
 // this segment does hold data. The dates are the actionable half: they turn
 // "empty" into a call that can succeed.
@@ -534,15 +748,22 @@ func availabilityText(a *api.Availability) string {
 	b.WriteString(verdictText(a.AvailabilityVerdict))
 	b.WriteString("\n")
 	if a.EarliestNonemptyPeriod != nil || a.LatestNonemptyPeriod != nil {
-		fmt.Fprintf(&b, "This segment has data from %s to %s", strText(a.EarliestNonemptyPeriod), strText(a.LatestNonemptyPeriod))
+		fmt.Fprintf(&b, "This segment has data from %s to %s", api.DashPtr(a.EarliestNonemptyPeriod), api.DashPtr(a.LatestNonemptyPeriod))
 		if a.SearchedFrom != nil {
 			fmt.Fprintf(&b, " (searched back to %s)", *a.SearchedFrom)
 		}
 		b.WriteString(".\n")
+		// The API's own caveat on those dates: size and price filters are
+		// not applied to them, so a named period can still come back empty
+		// for this request.
+		if note := strings.TrimSpace(a.Note); note != "" {
+			fmt.Fprintf(&b, "Note: %s\n", note)
+		}
 	} else if a.SearchedFrom != nil && a.Status != "ok" {
 		// A null date is "nothing in the window we looked at", never
-		// "nothing, ever" — say which window.
-		fmt.Fprintf(&b, "No period with data since %s (an earlier one may still hold some).\n", *a.SearchedFrom)
+		// "nothing, ever". The window starts at searched_from and, for a
+		// price_history with to, ends there — so say no more than "in it".
+		fmt.Fprintf(&b, "No period with data in the window the API searched (from %s); other periods may still hold some.\n", *a.SearchedFrom)
 	}
 	if a.Status != "ok" {
 		fmt.Fprintf(&b, "What to do: %s\n", reasonMove(a.ReasonOrUnknown()))
@@ -556,7 +777,7 @@ func verdictText(v api.AvailabilityVerdict) string {
 	if v.Status == "ok" {
 		return "availability: ok"
 	}
-	text := fmt.Sprintf("availability: %s — %s", orDash(v.Status), v.ReasonOrUnknown())
+	text := fmt.Sprintf("availability: %s — %s", api.Dash(v.Status), v.ReasonOrUnknown())
 	if v.Message != "" {
 		text += ": " + v.Message
 	}
@@ -572,45 +793,29 @@ func verdictText(v api.AvailabilityVerdict) string {
 func reasonMove(reason string) string {
 	switch reason {
 	case "no_data_for_selection":
-		return "the place holds data, but not for these filters — widen them (rooms, size, price)."
+		// Only what the API reported: nothing matched this selection. For an
+		// h3 cell or a circle the API does not measure the unfiltered
+		// population, so this never claims the territory holds data; the
+		// API's own message, printed above, says how far it knows.
+		return "nothing matched this selection — wider filters (rooms, size, price) may help; see the API's message above."
 	case "period_not_built":
 		return "this period is not built yet — use price_history for the periods that are."
 	case "no_data_for_place":
-		return "we hold no figures for this place — pick another place; this one will not answer."
+		// About THIS period only: the API sets it when the place holds no
+		// rows under ANY filters at every window it measured for this
+		// period, so changing the filters cannot help. Other periods may
+		// hold data: the availability dates name them when they do, and a
+		// null date covers only the searched window, so other periods
+		// stay possible.
+		return "we hold no figures for this place in this period, under any filters — changing the filters will not help. " +
+			"Use price_history for the periods that hold data if any are named, else over other periods; or pick another place."
 	case "below_minimum_sample":
-		return "too few listings to publish a figure — try price_history, or a wider area (the parent place)."
+		// The TERRITORY's whole population for the window is under the
+		// publication floor, and any selection inside it is smaller, so
+		// wider filters cannot help.
+		return "too few listings in this whole area to publish a figure — wider filters will not help. " +
+			"Try price_history, or a wider area (the parent place)."
 	default:
 		return "the API could not say why — try price_history, or a wider area (the parent place)."
 	}
-}
-
-// numText is a number rounded to cents, with no trailing zeros. nil is "—":
-// the aggregate held nothing for that field, which is not 0.
-func numText(v *float64) string {
-	if v == nil {
-		return "—"
-	}
-	return strconv.FormatFloat(math.Round(*v*100)/100, 'f', -1, 64)
-}
-
-func money(v *float64, currency string) string {
-	if v == nil {
-		return "—"
-	}
-	return numText(v) + " " + orDash(currency)
-}
-
-func area(v *float64) string {
-	if v == nil {
-		return "—"
-	}
-	return numText(v) + " m²"
-}
-
-func quoteList(items []string) string {
-	quoted := make([]string, len(items))
-	for i, item := range items {
-		quoted[i] = strconv.Quote(item)
-	}
-	return strings.Join(quoted, ", ")
 }

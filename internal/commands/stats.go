@@ -309,8 +309,8 @@ nothing in this window. It is not a zero and not an error.`,
 func renderCurrent(w io.Writer, resp *api.CurrentStats, params api.StatsParams) {
 	fmt.Fprintln(w, territoryLine(resp.Territory))
 	fmt.Fprintf(w, "period %s (%s) · window %s → %s · as_of %s · fx %s · figures in %s\n",
-		str(resp.Period), dash(resp.Granularity), str(resp.WindowStart), str(resp.WindowEnd),
-		str(resp.AsOf), str(resp.FxDate), dash(resp.Currency))
+		api.DashPtr(resp.Period), api.Dash(resp.Granularity), api.DashPtr(resp.WindowStart), api.DashPtr(resp.WindowEnd),
+		api.DashPtr(resp.AsOf), api.DashPtr(resp.FxDate), api.Dash(resp.Currency))
 	fmt.Fprintln(w, filtersLine(resp.Filters))
 	fmt.Fprintln(w)
 
@@ -342,11 +342,11 @@ func renderEmptyStats(w io.Writer, resp *api.CurrentStats, params api.StatsParam
 		// rather than guessing one. The old guess ("it held nothing that met
 		// the display floor") is wrong for two of the five reasons: an
 		// unbuilt period, and filters that matched nothing.
-		fmt.Fprintf(w, "No figures for this selection in period %s. That is a NORMAL answer, not an\n", str(resp.Period))
+		fmt.Fprintf(w, "No figures for this selection in period %s. That is a NORMAL answer, not an\n", api.DashPtr(resp.Period))
 		fmt.Fprintln(w, "error and not a zero.")
 		renderWhy(w, resp.Availability)
 	} else {
-		fmt.Fprintf(w, "No figures for this territory in period %s. That is a NORMAL answer, not an\n", str(resp.Period))
+		fmt.Fprintf(w, "No figures for this territory in period %s. That is a NORMAL answer, not an\n", api.DashPtr(resp.Period))
 		fmt.Fprintln(w, "error and not a zero: the territory is covered, and it held nothing that met the")
 		fmt.Fprintln(w, "display floor in this window.")
 	}
@@ -385,7 +385,7 @@ func renderWhy(w io.Writer, a *api.Availability) {
 	}
 	fmt.Fprintln(w)
 	if a.EarliestNonemptyPeriod != nil || a.LatestNonemptyPeriod != nil {
-		fmt.Fprintf(w, "This segment has data from %s to %s", str(a.EarliestNonemptyPeriod), str(a.LatestNonemptyPeriod))
+		fmt.Fprintf(w, "This segment has data from %s to %s", api.DashPtr(a.EarliestNonemptyPeriod), api.DashPtr(a.LatestNonemptyPeriod))
 		if a.SearchedFrom != nil {
 			fmt.Fprintf(w, " (searched back to %s)", *a.SearchedFrom)
 		}
@@ -431,12 +431,12 @@ func renderStatRows(w io.Writer, stats []api.Stat, currency string) {
 	fmt.Fprintf(w, "%d row(s).\n\n", len(stats))
 	table(w, func(tw io.Writer) {
 		fmt.Fprintf(tw, "ID\tNAME\tLEVEL\tMEDIAN %s/m²\tMEDIAN PRICE\tMEDIAN m²\tP05/m²\tP95/m²\tNOTES\n",
-			dash(currency))
+			api.Dash(currency))
 		for _, row := range stats {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				dash(row.H3), str(row.Name), str(row.ZoneLevel),
-				num(row.MedianPricePerSqm), num(row.MedianPrice), num(row.MedianArea),
-				num(row.P05PricePerSqm), num(row.P95PricePerSqm),
+				api.Dash(row.H3), api.DashPtr(row.Name), api.DashPtr(row.ZoneLevel),
+				api.Num(row.MedianPricePerSqm), api.Num(row.MedianPrice), api.Num(row.MedianArea),
+				api.Num(row.P05PricePerSqm), api.Num(row.P95PricePerSqm),
 				statNotes(row))
 		}
 	})
@@ -498,7 +498,7 @@ func territoryLine(t api.Territory) string {
 	default:
 		fmt.Fprintf(&b, "%d cell(s)", t.HexCount)
 	}
-	fmt.Fprintf(&b, " · selector %s", dash(t.Selector))
+	fmt.Fprintf(&b, " · selector %s", api.Dash(t.Selector))
 	if t.Resolution != nil {
 		fmt.Fprintf(&b, " · res %d", *t.Resolution)
 	}
@@ -515,15 +515,15 @@ func territoryLine(t api.Territory) string {
 // filter you did not name still has a value.
 func filtersLine(f api.Filters) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "filters: %s / %s", dash(f.AdType), dash(f.AdSubType))
+	fmt.Fprintf(&b, "filters: %s / %s", api.Dash(f.AdType), api.Dash(f.AdSubType))
 	if len(f.Rooms) > 0 {
 		fmt.Fprintf(&b, " · rooms %s", strings.Join(f.Rooms, ","))
 	}
 	if f.MinSize != nil || f.MaxSize != nil {
-		fmt.Fprintf(&b, " · size %s..%s m²", num(f.MinSize), num(f.MaxSize))
+		fmt.Fprintf(&b, " · size %s..%s m²", api.Num(f.MinSize), api.Num(f.MaxSize))
 	}
 	if f.MinPriceUSD != nil || f.MaxPriceUSD != nil {
-		fmt.Fprintf(&b, " · price %s..%s USD", num(f.MinPriceUSD), num(f.MaxPriceUSD))
+		fmt.Fprintf(&b, " · price %s..%s USD", api.Num(f.MinPriceUSD), api.Num(f.MaxPriceUSD))
 	}
 	b.WriteString(" · price filters are USD whatever the display currency is")
 	return b.String()
@@ -590,7 +590,7 @@ from the resolution and echoes it on every point.`,
 
 func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 	fmt.Fprintln(w, territoryLine(resp.Territory))
-	fmt.Fprintf(w, "%d period(s) · figures in %s\n", len(resp.Series), dash(resp.Currency))
+	fmt.Fprintf(w, "%d period(s) · figures in %s\n", len(resp.Series), api.Dash(resp.Currency))
 	fmt.Fprintln(w, filtersLine(resp.Filters))
 	fmt.Fprintln(w)
 
@@ -628,7 +628,7 @@ func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 			return
 		}
 		fmt.Fprintf(tw, "PERIOD\tGRANULARITY\tWINDOW\tAS_OF\tMEDIAN %s/m²\tMEDIAN PRICE\tMEDIAN m²\n",
-			dash(resp.Currency))
+			api.Dash(resp.Currency))
 		for _, point := range resp.Series {
 			var row api.Stat
 			if len(point.Stats) == 1 {
@@ -636,7 +636,7 @@ func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s → %s\t%s\t%s\t%s\t%s\n",
 				point.Period, point.Granularity, point.WindowStart, point.WindowEnd, point.AsOf,
-				num(row.MedianPricePerSqm), num(row.MedianPrice), num(row.MedianArea))
+				api.Num(row.MedianPricePerSqm), api.Num(row.MedianPrice), api.Num(row.MedianArea))
 		}
 	})
 

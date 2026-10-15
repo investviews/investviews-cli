@@ -168,6 +168,11 @@ func TestBrowsePlacesUnderACountry(t *testing.T) {
 	mustContain(t, text, "Under Spain (country, geo_id es), every city in the country.")
 	mustContain(t, text, "Valencia — city, geo_id R1 — availability: ask_current — prices, current period 2026-09-01")
 	mustContain(t, text, "Teruel — city, geo_id R4 — availability: try_history")
+	// Each row carries its chain, so two places of one name stay apart.
+	mustContain(t, text, "Valencia — city, geo_id R1 — availability: ask_current — prices, current period 2026-09-01 — market_stats will answer\n  in: Spain (country, es)\n")
+	if got := strings.Count(text, "  in: Spain (country, es)\n"); got != 2 {
+		t.Errorf("rows with ancestry = %d, want 2:\n%s", got, text)
+	}
 }
 
 func TestBrowsePlacesUnderAPlaceFiltersChildren(t *testing.T) {
@@ -209,6 +214,8 @@ func TestBrowsePlacesRefusesLimitAndPageOverTheMax(t *testing.T) {
 	}{
 		{"limit", map[string]any{"parent": "es", "limit": 101}, "limit of at most 100"},
 		{"page", map[string]any{"parent": "es", "page": 10001}, "page of at most 10000"},
+		{"negative limit", map[string]any{"parent": "es", "limit": -1}, "limit must be 1 or more, got -1"},
+		{"zero page", map[string]any{"parent": "es", "page": 0}, "page must be 1 or more, got 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session, fake := connectFake(t, freeJSON(browseCountryReply))
@@ -372,5 +379,17 @@ func TestGeoToolSchemasRequireOnlyWhatTheyNeed(t *testing.T) {
 	}
 	if seen != len(want) {
 		t.Errorf("found %d geo tools in tools/list, want %d", seen, len(want))
+	}
+}
+
+func TestFindPlaceRefusesALimitBelowOne(t *testing.T) {
+	session, fake := connectFake(t, freeJSON(`{"results":[]}`))
+	res := callTool(t, session, "find_place", map[string]any{"q": "valencia", "limit": -5})
+	if !res.IsError {
+		t.Fatalf("a negative limit must come back with isError, got: %s", textOf(t, res))
+	}
+	mustContain(t, textOf(t, res), "limit must be 1 or more, got -5")
+	if fake.hits() != 0 {
+		t.Errorf("sent %d requests, want 0", fake.hits())
 	}
 }

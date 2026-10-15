@@ -115,8 +115,14 @@ func TestFailCarriesMessageDocsURLAndHint(t *testing.T) {
 	if strings.Contains(text, "investviews usage") {
 		t.Errorf("the hint still names a CLI command:\n%s", text)
 	}
-	if res.StructuredContent != nil {
-		t.Errorf("a failed call carries structuredContent: %v", res.StructuredContent)
+	// The same error as fields, for a client that reads structuredContent.
+	var payload struct {
+		Error toolError `json:"error"`
+	}
+	structured(t, res, &payload)
+	if payload.Error.Code != "quota_exhausted" || payload.Error.Status != 402 ||
+		payload.Error.DocsURL == "" || !strings.Contains(payload.Error.Hint, "the `usage` tool") {
+		t.Errorf("structured error = %+v", payload.Error)
 	}
 }
 
@@ -128,7 +134,11 @@ func TestFailListsDidYouMeanWithGeoIDs(t *testing.T) {
 		writeBody(w, http.StatusNotFound, `{"error":"unknown_place","message":"Nothing matched.","docs_url":"d",`+
 			`"query":"zaragosa","did_you_mean":[`+
 			`{"geo_id":"R1","name":"Zaragoza","level":"city","country":"es","ancestors":[]},`+
-			`{"geo_id":"R2","name":"Zamora","level":"city","country":"es","ancestors":null}]}`)
+			`{"geo_id":"R2","name":"Zamora","level":"city","country":"es","ancestors":null},`+
+			`{"geo_id":"R3","name":"Santiago","level":"city","country":"es","ancestors":[`+
+			`{"geo_id":"R10","name":"A Coruña","level":"province"},{"geo_id":"R9","name":"España","level":"country"}]},`+
+			`{"geo_id":"R4","name":"Santiago","level":"city","country":"es","ancestors":[`+
+			`{"geo_id":"R11","name":"Málaga","level":"province"},{"geo_id":"R9","name":"España","level":"country"}]}]}`)
 	})
 
 	res := callProbe(t, f.factory(t), func(ctx context.Context, s *server) (*mcp.CallToolResult, any, error) {
@@ -148,6 +158,25 @@ func TestFailListsDidYouMeanWithGeoIDs(t *testing.T) {
 	mustContain(t, text, "Nothing matched.")
 	mustContain(t, text, "Zaragoza (city, es) — geo_id R1")
 	mustContain(t, text, "Zamora (city, es) — geo_id R2")
+	// Two same-named places in one country differ only by their chain.
+	mustContain(t, text, "Santiago (city, es) — geo_id R3\n  in: A Coruña (province, R10) › España (country, R9)")
+	mustContain(t, text, "Santiago (city, es) — geo_id R4\n  in: Málaga (province, R11) › España (country, R9)")
+
+	var payload struct {
+		Error struct {
+			DidYouMean []struct {
+				GeoID     string `json:"geo_id"`
+				Ancestors []struct {
+					GeoID string `json:"geo_id"`
+				} `json:"ancestors"`
+			} `json:"did_you_mean"`
+		} `json:"error"`
+	}
+	structured(t, res, &payload)
+	if hits := payload.Error.DidYouMean; len(hits) != 4 || hits[2].GeoID != "R3" ||
+		len(hits[2].Ancestors) != 2 || hits[2].Ancestors[0].GeoID != "R10" {
+		t.Errorf("did_you_mean in structuredContent = %+v, want each place with its chain", hits)
+	}
 	// "browse from investviews geo" in the hint becomes the tool name.
 	mustContain(t, text, "browse from `browse_places`")
 }
@@ -367,7 +396,17 @@ func TestClientGivesUpOnALongRetryAfter(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("a 429 over the retry budget must come back with isError")
 	}
-	mustContain(t, textOf(t, res), "NOT your quota")
+	text := textOf(t, res)
+	mustContain(t, text, "NOT your quota")
+	// The server's own wait is passed on, not lost behind "wait and retry".
+	mustContain(t, text, "The server asked for a wait of 60s (Retry-After)")
+	var payload struct {
+		Error toolError `json:"error"`
+	}
+	structured(t, res, &payload)
+	if payload.Error.RetryAfterSeconds == nil || *payload.Error.RetryAfterSeconds != 60 {
+		t.Errorf("retry_after_seconds = %v, want 60", payload.Error.RetryAfterSeconds)
+	}
 	if f.hits() != 1 {
 		t.Errorf("hits = %d, want 1 — a 60s wait is over the %v budget", f.hits(), retryBudget)
 	}

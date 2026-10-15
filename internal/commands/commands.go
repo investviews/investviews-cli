@@ -31,8 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -269,34 +267,9 @@ func ancestry(a api.Ancestors) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// values
+// values — Dash, DashPtr, Num, Count, YesNo and Resolutions live in
+// internal/api/format.go, shared with internal/mcpserver.
 // ─────────────────────────────────────────────────────────────────────────────
-
-// num renders an optional figure. ⚠️ A missing figure is an em dash, never a
-// zero: the aggregate held nothing for that field, which is not the number 0.
-func num(v *float64) string {
-	if v == nil {
-		return "—"
-	}
-	rounded := math.Round(*v*100) / 100
-	return strconv.FormatFloat(rounded, 'f', -1, 64)
-}
-
-func str(v *string) string {
-	if v == nil || *v == "" {
-		return "—"
-	}
-	return *v
-}
-
-// dash renders an empty string as an em dash, so a blank column is visibly
-// blank rather than looking like a layout bug.
-func dash(v string) string {
-	if strings.TrimSpace(v) == "" {
-		return "—"
-	}
-	return v
-}
 
 // splitList expands a repeatable flag that also accepts comma-joined values,
 // so --h3 a --h3 b,c and --h3 a,b,c are the same request.

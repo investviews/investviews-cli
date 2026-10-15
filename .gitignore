@@ -9,6 +9,3 @@
 
 # git worktrees — always created at .claude/worktrees/<name>
 .claude/worktrees/
-
-# Claude Code worktrees
-.claude/worktrees/

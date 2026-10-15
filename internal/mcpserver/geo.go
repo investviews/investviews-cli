@@ -20,29 +20,16 @@ import (
 // no_data — and a price_history call that may well answer. An agent that sees
 // only the name spends the wrong call, or gives up on a live place.
 
-// readOnly is the annotation set every InvestViews tool carries: it reads, it
-// changes nothing, the same call twice is the same call, and it talks to an
-// outside service. DestructiveHint is left unset — the spec ignores it when
-// ReadOnlyHint is true.
-func readOnly(title string) *mcp.ToolAnnotations {
-	openWorld := true
-	return &mcp.ToolAnnotations{
-		Title:          title,
-		ReadOnlyHint:   true,
-		IdempotentHint: true,
-		OpenWorldHint:  &openWorld,
-	}
-}
-
 func (s *server) registerGeo(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "find_place",
 		Annotations: readOnly("Find a place by name"),
-		Description: `FREE — costs no quota. Resolve a place name (city, district, neighbourhood) to a geo_id you can pass to market_stats, price_history or compare_places.
+		Description: fmt.Sprintf(`FREE — costs no quota. Resolve a place name (city, district, neighbourhood) to a geo_id you can pass to market_stats, price_history or compare_places.
 
 Names are not unique: many neighbourhood names repeat inside one country. Tell same-named hits apart by the ancestry chain under each, never by the name. Every hit says whether the place has prices and data this period; do not spend a metered call on a dead end.
 
-There is no paging: one answer, at most 50 hits (limit defaults to 10). A miss is an error that lists did_you_mean suggestions, each with a geo_id you can use straight away.`,
+There is no paging: one answer, at most %d hits (limit defaults to %d; the server clamps a larger one silently). A miss is an error that lists did_you_mean suggestions, each with a geo_id you can use straight away.`,
+			api.SearchServerClamp, api.SearchDefaultLimit),
 	}, s.findPlace)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -60,9 +47,10 @@ limit is at most %d, page at most %d. An empty list is a normal answer (a page p
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "place_at_point",
 		Annotations: readOnly("Name the places at a point"),
-		Description: `FREE — costs no quota. Turn a coordinate into the H3 cell under it and the named zones that contain it, fine to coarse, each with its geo_id when it has one.
+		Description: fmt.Sprintf(`FREE — costs no quota. Turn a coordinate into the H3 cell under it and the named zones that contain it, fine to coarse, each with its geo_id when it has one.
 
-res is the H3 resolution of the cell (4–8; the server picks one when unset). Some zones come back with no geo_id and unknown ancestry: the API can name them but holds no hierarchy row — use the cell or another zone instead. No zones at all is a normal answer: the point is outside the geography this API holds.`,
+res is the H3 resolution of the cell (%d–%d; the server picks one when unset). Some zones come back with no geo_id and unknown ancestry: the API can name them but holds no hierarchy row — use the cell or another zone instead. No zones at all is a normal answer: the point is outside the geography this API holds.`,
+			api.LookupMinRes, api.LookupMaxRes),
 	}, s.placeAtPoint)
 }
 
@@ -74,10 +62,13 @@ type findPlaceArgs struct {
 	Q       string `json:"q" jsonschema:"the place name to resolve, e.g. Valencia or Ruzafa"`
 	Country string `json:"country,omitempty" jsonschema:"ISO 3166-1 alpha-2 country code to search in, e.g. es"`
 	Level   string `json:"level,omitempty" jsonschema:"restrict to one level: region, province, city, macrozone, microzone"`
-	Limit   *int   `json:"limit,omitempty" jsonschema:"maximum hits; default 10, the server clamps it at 50 silently"`
+	Limit   *int   `json:"limit,omitempty" jsonschema:"maximum hits; the default and the server's cap are in the tool description"`
 }
 
 func (s *server) findPlace(ctx context.Context, _ *mcp.CallToolRequest, args findPlaceArgs) (*mcp.CallToolResult, any, error) {
+	if err := atLeastOne("limit", args.Limit); err != nil {
+		return fail(err)
+	}
 	c, err := s.client()
 	if err != nil {
 		return fail(err)
@@ -100,14 +91,14 @@ func searchText(query string, resp *api.SearchResponse) string {
 	}
 	b.WriteString("Same-named places are told apart by the chain under each hit, never by the name.\n")
 	for i, hit := range resp.Results {
-		fmt.Fprintf(&b, "\n%d. %s — %s, %s\n", i+1, orDash(hit.Name), orDash(hit.Level), orDash(hit.Country))
-		fmt.Fprintf(&b, "   geo_id: %s\n", orDash(hit.GeoID))
+		fmt.Fprintf(&b, "\n%d. %s — %s, %s\n", i+1, api.Dash(hit.Name), api.Dash(hit.Level), api.Dash(hit.Country))
+		fmt.Fprintf(&b, "   geo_id: %s\n", api.Dash(hit.GeoID))
 		fmt.Fprintf(&b, "   in: %s\n", ancestryText(hit.Ancestors))
 		if hit.IsPoint() {
 			// The tree missed and the geocoder answered: a coordinate, not a
 			// place in the hierarchy.
 			fmt.Fprintf(&b, "   point: %s, %s (geocoder fallback; source %s)\n",
-				floatText(hit.Lat), floatText(hit.Lng), orDash(hit.Source))
+				floatText(hit.Lat), floatText(hit.Lng), api.Dash(hit.Source))
 		}
 		fmt.Fprintf(&b, "   %s\n", signalText(hit.PricesAvailable, hit.HasData, hit.CurrentPeriod))
 	}
@@ -121,11 +112,17 @@ func searchText(query string, resp *api.SearchResponse) string {
 type browsePlacesArgs struct {
 	Parent string `json:"parent,omitempty" jsonschema:"ISO country code (es) or a geo_id (R344953); empty lists the countries served"`
 	Level  string `json:"level,omitempty" jsonschema:"under a country: select that whole level; under a place: filter its direct children. region, province, city, macrozone, microzone"`
-	Limit  *int   `json:"limit,omitempty" jsonschema:"rows per page, at most 100"`
-	Page   *int   `json:"page,omitempty" jsonschema:"page number from 1, at most 10000"`
+	Limit  *int   `json:"limit,omitempty" jsonschema:"rows per page; the cap is in the tool description"`
+	Page   *int   `json:"page,omitempty" jsonschema:"page number from 1; the cap is in the tool description"`
 }
 
 func (s *server) browsePlaces(ctx context.Context, _ *mcp.CallToolRequest, args browsePlacesArgs) (*mcp.CallToolResult, any, error) {
+	if err := atLeastOne("limit", args.Limit); err != nil {
+		return fail(err)
+	}
+	if err := atLeastOne("page", args.Page); err != nil {
+		return fail(err)
+	}
 	c, err := s.client()
 	if err != nil {
 		return fail(err)
@@ -146,7 +143,7 @@ func browseText(args browsePlacesArgs, resp *api.GeoResponse) string {
 	var b strings.Builder
 	switch {
 	case resp.Parent != nil:
-		fmt.Fprintf(&b, "Under %s (%s, geo_id %s)", orDash(resp.Parent.Name), orDash(resp.Parent.Level), orDash(resp.Parent.GeoID))
+		fmt.Fprintf(&b, "Under %s (%s, geo_id %s)", api.Dash(resp.Parent.Name), api.Dash(resp.Parent.Level), api.Dash(resp.Parent.GeoID))
 		if args.Level != "" {
 			// Name which of level's two meanings applied, in the answer and
 			// not only in the tool description.
@@ -170,8 +167,11 @@ func browseText(args browsePlacesArgs, resp *api.GeoResponse) string {
 	}
 	fmt.Fprintf(&b, "%d row(s). Pass a geo_id as parent to go deeper, or as geo_id to market_stats.\n", len(resp.Results))
 	for _, row := range resp.Results {
-		fmt.Fprintf(&b, "- %s — %s, geo_id %s — %s\n", orDash(row.Name), orDash(row.Level), orDash(row.GeoID),
+		fmt.Fprintf(&b, "- %s — %s, geo_id %s — %s\n", api.Dash(row.Name), api.Dash(row.Level), api.Dash(row.GeoID),
 			signalText(row.PricesAvailable, row.HasData, row.CurrentPeriod))
+		// A country-wide list can hold two places of one name; the chain
+		// is what tells them apart in text.
+		fmt.Fprintf(&b, "  in: %s\n", ancestryText(row.Ancestors))
 	}
 	return b.String()
 }
@@ -186,7 +186,7 @@ func browseText(args browsePlacesArgs, resp *api.GeoResponse) string {
 type placeAtPointArgs struct {
 	Lat float64 `json:"lat" jsonschema:"latitude in degrees, -90 to 90"`
 	Lng float64 `json:"lng" jsonschema:"longitude in degrees, -180 to 180"`
-	Res *int    `json:"res,omitempty" jsonschema:"H3 resolution of the cell, 4 to 8"`
+	Res *int    `json:"res,omitempty" jsonschema:"H3 resolution of the cell; the range is in the tool description"`
 }
 
 func (s *server) placeAtPoint(ctx context.Context, _ *mcp.CallToolRequest, args placeAtPointArgs) (*mcp.CallToolResult, any, error) {
@@ -216,9 +216,9 @@ func (s *server) placeAtPoint(ctx context.Context, _ *mcp.CallToolRequest, args 
 
 func pointText(point *api.Point) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Cell %s (res %d) at %s, %s.\n", orDash(point.H3), point.H3Res,
+	fmt.Fprintf(&b, "Cell %s (res %d) at %s, %s.\n", api.Dash(point.H3), point.H3Res,
 		floatText(&point.Lat), floatText(&point.Lng))
-	fmt.Fprintf(&b, "%s (%s)\n", strText(point.DisplayName), strText(point.Country))
+	fmt.Fprintf(&b, "%s (%s)\n", api.DashPtr(point.DisplayName), api.DashPtr(point.Country))
 	b.WriteString(pointSignalText(point))
 	b.WriteString("\n")
 
@@ -233,7 +233,7 @@ func pointText(point *api.Point) string {
 			geoID = *zone.GeoID
 		}
 		fmt.Fprintf(&b, "- %s — %s, geo_id %s, data this period: %s\n  in: %s\n",
-			orDash(zone.Name), orDash(zone.Level), geoID, dataNowText(zone.HasData, zone.CurrentPeriod),
+			api.Dash(zone.Name), api.Dash(zone.Level), geoID, dataNowText(zone.HasData, zone.CurrentPeriod),
 			ancestryText(zone.Ancestors))
 	}
 	return b.String()
@@ -319,23 +319,15 @@ func ancestryText(a api.Ancestors) string {
 	return strings.Join(parts, " › ")
 }
 
-func intOr0(v *int) int {
-	if v == nil {
-		return 0
+// atLeastOne refuses a limit or page below 1. They are pointers so that an
+// omitted value (the server's default) differs from an explicit 0, which the
+// api layer would silently read as "omitted" too.
+func atLeastOne(name string, v *int) error {
+	if v != nil && *v < 1 {
+		return &api.ValidationError{
+			Parameter: name,
+			Message:   fmt.Sprintf("%s must be 1 or more, got %d; omit it for the default. Nothing was sent", name, *v),
+		}
 	}
-	return *v
-}
-
-func floatText(v *float64) string {
-	if v == nil {
-		return "—"
-	}
-	return fmt.Sprintf("%g", *v)
-}
-
-func strText(v *string) string {
-	if v == nil {
-		return "—"
-	}
-	return orDash(*v)
+	return nil
 }

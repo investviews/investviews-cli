@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // placeReply is a one-row /stats/current answer for a named place.
@@ -71,6 +72,9 @@ type decodedRow struct {
 	MedianPricePerSqm *float64 `json:"median_price_per_sqm"`
 	MedianPrice       *float64 `json:"median_price"`
 	MedianArea        *float64 `json:"median_area"`
+	Granularity       string   `json:"granularity"`
+	WindowStart       *string  `json:"window_start"`
+	WindowEnd         *string  `json:"window_end"`
 	Availability      *struct {
 		Status string  `json:"status"`
 		Reason *string `json:"reason"`
@@ -79,6 +83,8 @@ type decodedRow struct {
 		Code    string `json:"code"`
 		Status  int    `json:"status"`
 		Message string `json:"message"`
+		// RetryAfterSeconds is the server's wait on a 429.
+		RetryAfterSeconds *int `json:"retry_after_seconds"`
 	} `json:"error"`
 }
 
@@ -158,7 +164,7 @@ func TestComparePlacesAsksEachPlaceInOrder(t *testing.T) {
 	}
 
 	text := textOf(t, res)
-	mustContain(t, text, "1. València (city, es) — geo_id R1 · period 2026-08-01: median asking price per m²: 3120 EUR · median asking price: 285000 EUR · median size: 92 m²")
+	mustContain(t, text, "1. València (city, es) — geo_id R1 · period 2026-08-01 (month, 2026-08-01 → 2026-08-31): median asking price per m²: 3120 EUR · median asking price: 285000 EUR · median size: 92 m²")
 	mustContain(t, text, "2. Alicante (city, es) — geo_id R2")
 	mustContain(t, text, "3. Málaga (city, es) — geo_id R3")
 	mustContain(t, text, "median of ASKING prices")
@@ -198,6 +204,7 @@ func TestComparePlacesRefusesTheWrongNumberOfPlaces(t *testing.T) {
 		{"six places", []string{"R1", "R2", "R3", "R4", "R5", "R6"}, "takes 2 to 5 geo_ids, got 6"},
 		{"blanks do not count", []string{"R1", " ", ""}, "got 1"},
 		{"a repeat", []string{"R1", "R2", "R1"}, `names "R1" twice`},
+		{"a repeat in another case", []string{"es", "R2", "ES"}, `names "ES" twice`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,8 +284,8 @@ func TestComparePlacesEmptyPlaceGivesItsReason(t *testing.T) {
 	}
 
 	text := textOf(t, res)
-	mustContain(t, text, "2. Xàtiva (city, es) — geo_id R2 · period 2026-08-01: no figures — availability: no_data — below_minimum_sample: Too few listings to publish a figure.")
-	mustContain(t, text, "What to do: too few listings to publish a figure")
+	mustContain(t, text, "2. Xàtiva (city, es) — geo_id R2 · period 2026-08-01 (month): no figures — availability: no_data — below_minimum_sample: Too few listings to publish a figure.")
+	mustContain(t, text, "What to do: too few listings in this whole area to publish a figure")
 }
 
 // ── stop only when the next call cannot succeed ──────────────────────────────
@@ -357,6 +364,9 @@ func TestComparePlacesRateLimitStops(t *testing.T) {
 	})
 
 	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2", "R3"}})
+	if res.IsError {
+		t.Fatalf("one place answered, so the call is not an error: %s", textOf(t, res))
+	}
 	if fake.hits() != 2 {
 		t.Errorf("sent %d requests, want 2", fake.hits())
 	}
@@ -364,7 +374,165 @@ func TestComparePlacesRateLimitStops(t *testing.T) {
 	if a.Stopped != "rate_limited" {
 		t.Errorf("stopped = %q, want rate_limited", a.Stopped)
 	}
+	if strings.Join(a.NotAsked, ",") != "R3" {
+		t.Errorf("not_asked = %v, want [R3]", a.NotAsked)
+	}
+	if len(a.Rows) != 2 || a.Rows[0].MedianPricePerSqm == nil || *a.Rows[0].MedianPricePerSqm != 3120 {
+		t.Errorf("rows = %+v, want row 1 with its figure kept", a.Rows)
+	}
 	mustContain(t, textOf(t, res), "NOT your quota")
+	if e := a.Rows[1].Error; e == nil || e.RetryAfterSeconds == nil || *e.RetryAfterSeconds != 60 {
+		t.Errorf("row 2 error = %+v, want retry_after_seconds 60", e)
+	}
+}
+
+// Two places with the same period date but different aggregation windows are
+// flagged, and every row carries its window, in the text and in the payload.
+func TestComparePlacesFlagsDifferentWindowsForOnePeriod(t *testing.T) {
+	rolling := strings.Replace(placeReply("R2", "Xàtiva", "EUR", "2026-08-01", 2100),
+		`"granularity":"month",
+ "window_start":"2026-08-01"`, `"granularity":"rolling_3m",
+ "window_start":"2026-06-01"`, 1)
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(placeReply("R1", "València", "EUR", "2026-08-01", 3120)),
+		"R2": meteredJSON(rolling),
+	}))
+
+	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}})
+	if res.IsError {
+		t.Fatalf("compare_places failed: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "geo_id R2 · period 2026-08-01 (rolling_3m, 2026-06-01 → 2026-08-31):")
+	mustContain(t, text, "share a period but were aggregated over different windows "+
+		"(2026-08-01 (month, 2026-08-01 → 2026-08-31); 2026-08-01 (rolling_3m, 2026-06-01 → 2026-08-31))")
+	if strings.Contains(text, "different periods") {
+		t.Errorf("the periods are the same, only the windows differ:\n%s", text)
+	}
+
+	a := compareAnswerOf(t, res.StructuredContent)
+	r := a.Rows[1]
+	if r.Granularity != "rolling_3m" || r.WindowStart == nil || *r.WindowStart != "2026-06-01" ||
+		r.WindowEnd == nil || *r.WindowEnd != "2026-08-31" {
+		t.Errorf("row 2 window = %q %v %v, want rolling_3m 2026-06-01 → 2026-08-31", r.Granularity, r.WindowStart, r.WindowEnd)
+	}
+}
+
+// Places on the same window raise no window warning.
+func TestComparePlacesSameWindowIsNotFlagged(t *testing.T) {
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(placeReply("R1", "València", "EUR", "2026-08-01", 3120)),
+		"R2": meteredJSON(emptyPlaceReply("R2", "Xàtiva")),
+	}))
+	text := textOf(t, callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}}))
+	if strings.Contains(text, "different windows") {
+		t.Errorf("a place that sent no window is not a different window:\n%s", text)
+	}
+}
+
+// A filter value the server refuses is shared by every place, so the loop
+// stops instead of paying for the same refusal again.
+func TestComparePlacesStopsOnARefusedFilter(t *testing.T) {
+	session, fake := connectFake(t, apiError(http.StatusBadRequest, `{"error":"invalid_parameter",`+
+		`"message":"rooms is not one of 1, 2, 3, 4, 5+.","parameter":"rooms","docs_url":"d"}`))
+
+	res := callTool(t, session, "compare_places", map[string]any{
+		"geo_ids": []string{"R1", "R2", "R3"}, "rooms": []string{"9"},
+	})
+	if fake.hits() != 1 {
+		t.Errorf("sent %d requests, want 1", fake.hits())
+	}
+	a := compareAnswerOf(t, res.StructuredContent)
+	if a.Stopped != "invalid_parameter" {
+		t.Errorf("stopped = %q, want invalid_parameter", a.Stopped)
+	}
+	if strings.Join(a.NotAsked, ",") != "R2,R3" {
+		t.Errorf("not_asked = %v, want [R2 R3]", a.NotAsked)
+	}
+}
+
+// An error row's structuredContent message is in the tools' words, like its
+// text: an agent reading the payload must not be told to use --geo-id.
+func TestComparePlacesErrorRowMessageUsesToolWords(t *testing.T) {
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(placeReply("R1", "València", "EUR", "2026-08-01", 3120)),
+		"R2": apiError(http.StatusBadRequest, `{"error":"invalid_parameter",`+
+			"\"message\":\"Pass a --geo-id from `investviews geo search`.\",\"parameter\":\"geo_id\",\"docs_url\":\"d\"}"),
+	}))
+
+	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}})
+	a := compareAnswerOf(t, res.StructuredContent)
+	if len(a.Rows) != 2 || a.Rows[1].Error == nil {
+		t.Fatalf("rows = %+v, want an error row for R2", a.Rows)
+	}
+	msg := a.Rows[1].Error.Message
+	if strings.Contains(msg, "--geo-id") || strings.Contains(msg, "investviews geo search") {
+		t.Errorf("error message keeps the CLI's words: %q", msg)
+	}
+	mustContain(t, msg, "Pass a geo_id from `find_place`.")
+}
+
+// The filters are stated once for the whole comparison, not on every row:
+// every place is sent the same ones.
+func TestComparePlacesStatesTheFiltersOnce(t *testing.T) {
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(placeReply("R1", "València", "EUR", "2026-08-01", 3120)),
+		"R2": meteredJSON(placeReply("R2", "Alicante", "EUR", "2026-08-01", 2450)),
+	}))
+
+	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}})
+	var payload struct {
+		Filters *struct {
+			AdSubType string `json:"ad_sub_type"`
+		} `json:"filters"`
+		Rows []map[string]any `json:"rows"`
+	}
+	structured(t, res, &payload)
+	if payload.Filters == nil || payload.Filters.AdSubType != "buy" {
+		t.Errorf("filters = %+v, want the applied filters once at the top", payload.Filters)
+	}
+	for i, row := range payload.Rows {
+		if _, has := row["filters"]; has {
+			t.Errorf("row %d repeats the filters", i)
+		}
+	}
+	if n := strings.Count(textOf(t, res), "filters: "); n != 1 {
+		t.Errorf("text states the filters %d times, want 1", n)
+	}
+}
+
+// One deadline covers the whole comparison: a slow API stops the loop with
+// timed_out instead of spending the limit again on every place.
+func TestComparePlacesStopsAtTheToolDeadline(t *testing.T) {
+	saved := toolTimeout
+	toolTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { toolTimeout = saved })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	session, fake := connectFake(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+
+	start := time.Now()
+	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2", "R3"}})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("compare_places took %v with a 100ms tool deadline", elapsed)
+	}
+	if !res.IsError {
+		t.Fatalf("no place answered, want isError: %s", textOf(t, res))
+	}
+	if fake.hits() != 1 {
+		t.Errorf("sent %d requests, want 1", fake.hits())
+	}
+	a := compareAnswerOf(t, res.StructuredContent)
+	if a.Stopped != "timed_out" {
+		t.Errorf("stopped = %q, want timed_out", a.Stopped)
+	}
+	mustContain(t, textOf(t, res), "ran out of its")
 }
 
 // ── announcement ─────────────────────────────────────────────────────────────
@@ -415,4 +583,52 @@ func TestComparePlacesIsAnnouncedMetered(t *testing.T) {
 		return
 	}
 	t.Fatal("compare_places is not in tools/list")
+}
+
+// Size and price ranges are applied at bin edges: each row keeps the bounds
+// the server really selected, in structuredContent and in the text.
+func TestComparePlacesKeepsBinApproximations(t *testing.T) {
+	approx := `"bin_approximations":{"price_usd":{"requested":[null,300000],"effective":[null,312000]}},`
+	withApprox := func(body string) string {
+		return strings.Replace(body, `"stats":`, approx+` "stats":`, 1)
+	}
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(withApprox(placeReply("R1", "València", "EUR", "2026-08-01", 3120))),
+		"R2": meteredJSON(placeReply("R2", "Alicante", "EUR", "2026-08-01", 2450)),
+	}))
+
+	res := callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}, "max_price_usd": 300000})
+	var payload struct {
+		Rows []struct {
+			BinApproximations map[string]json.RawMessage `json:"bin_approximations"`
+		} `json:"rows"`
+	}
+	structured(t, res, &payload)
+	if got := string(payload.Rows[0].BinApproximations["price_usd"]); !strings.Contains(got, "312000") {
+		t.Errorf("row 1 bin_approximations = %q, want the effective bound 312000", got)
+	}
+	if payload.Rows[1].BinApproximations != nil {
+		t.Errorf("row 2 sent no bin_approximations, got %v", payload.Rows[1].BinApproximations)
+	}
+	text := textOf(t, res)
+	mustContain(t, text, `price_usd {"requested":[null,300000],"effective":[null,312000]}`)
+	if n := strings.Count(text, "applied at bin edges"); n != 1 {
+		t.Errorf("bin edge line printed %d times, want once (row 1 only):\n%s", n, text)
+	}
+}
+
+// An empty place that names periods holding data shows them, with the API's
+// note that size and price filters are not applied to those dates.
+func TestComparePlacesEmptyPlaceNamesItsDataPeriods(t *testing.T) {
+	body := strings.Replace(emptyPlaceReply("R2", "Xàtiva"),
+		`"earliest_nonempty_period":null,"latest_nonempty_period":null`,
+		`"earliest_nonempty_period":"2025-11-01","latest_nonempty_period":"2026-07-01","note":"Size and price filters are not applied to these dates."`, 1)
+	session, _ := connectFake(t, byGeoID(map[string]http.HandlerFunc{
+		"R1": meteredJSON(placeReply("R1", "València", "EUR", "2026-08-01", 3120)),
+		"R2": meteredJSON(body),
+	}))
+
+	text := textOf(t, callTool(t, session, "compare_places", map[string]any{"geo_ids": []string{"R1", "R2"}}))
+	mustContain(t, text, "   This segment has data from 2025-11-01 to 2026-07-01.")
+	mustContain(t, text, "   Note: Size and price filters are not applied to these dates.")
 }

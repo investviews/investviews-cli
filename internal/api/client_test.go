@@ -301,6 +301,27 @@ func TestRetryBudgetIsATotalAcrossRetries(t *testing.T) {
 	}
 }
 
+// A wait that would outlast the caller's deadline is not slept: the call
+// returns the rate-limit error it has, not a bare "context deadline exceeded".
+func TestRetryWaitPastTheDeadlineReturnsTheErrorInHand(t *testing.T) {
+	rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		meteredHeaders(w)
+		writeJSON(w, 429, `{"error":"rate_limited","message":"slow down","docs_url":"d","retry_after":30,"limit":300,"group":"current"}`)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := rec.client.StatsCurrent(ctx, StatsParams{GeoID: "es"})
+	var rate *RateLimitError
+	if !errors.As(err, &rate) {
+		t.Fatalf("err = %v, want *RateLimitError", err)
+	}
+	if rec.hits() != 1 || len(rec.sleeps) != 0 {
+		t.Errorf("hits = %d, sleeps = %v — a 30s wait past a 5s deadline must not be slept", rec.hits(), rec.sleeps)
+	}
+}
+
 // WithRetryBudget returns a copy. The client the factory built for the CLI
 // keeps its two-minute patience.
 func TestWithRetryBudgetLeavesTheOriginalAlone(t *testing.T) {

@@ -22,8 +22,10 @@
 package mcpserver
 
 import (
+	"context"
 	_ "embed"
 	"log/slog"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -47,8 +49,9 @@ const Name = "investviews"
 var instructions string
 
 // ClientFactory builds an API client for one tool call. In the binary it is
-// commands.Deps.NewClient, which reads the saved token and returns
-// ErrNoToken when there is none; tests point it at an httptest server.
+// the commands package's Deps.client, a nil-guarded wrapper around
+// Deps.NewClient that reads the saved token and returns ErrNoToken when there
+// is none; tests point it at an httptest server.
 type ClientFactory func() (*api.Client, error)
 
 // server is the state every tool handler shares. It holds the factory, not a
@@ -57,28 +60,21 @@ type server struct {
 	newClient ClientFactory
 }
 
-// Option changes how New builds the server. There is one today, WithLogger.
-type Option func(*mcp.ServerOptions)
-
-// WithLogger sends the SDK's own log lines (session connected, session ended,
-// a notification that failed) to l.
-//
-// ⚠️ l MUST NOT WRITE TO STDOUT when the server runs on stdio. Stdout IS the
-// protocol stream: one stray log line there is a frame the client cannot
-// parse, and most clients drop the whole connection on it. `investviews mcp`
-// points l at stderr, which every MCP client keeps as the server's log.
-// Without this option the SDK discards its logs.
-func WithLogger(l *slog.Logger) Option {
-	return func(o *mcp.ServerOptions) { o.Logger = l }
-}
-
 // New builds the MCP server. version is the build stamp
 // (internal/version.Version) and is what `initialize` reports, so a support
 // thread can ask the agent which build it is talking to.
 //
+// logger receives the SDK's own log lines (session connected, session ended,
+// a notification that failed); nil discards them.
+//
+// ⚠️ logger MUST NOT WRITE TO STDOUT when the server runs on stdio. Stdout IS
+// the protocol stream: one stray log line there is a frame the client cannot
+// parse, and most clients drop the whole connection on it. `investviews mcp`
+// points it at stderr, which every MCP client keeps as the server's log.
+//
 // The server is returned unconnected: the caller picks the transport (stdio
 // for `investviews mcp`, in-memory for tests).
-func New(newClient ClientFactory, version string, opts ...Option) *mcp.Server {
+func New(newClient ClientFactory, version string, logger *slog.Logger) *mcp.Server {
 	s := &server{newClient: newClient}
 
 	serverOpts := &mcp.ServerOptions{
@@ -89,18 +85,47 @@ func New(newClient ClientFactory, version string, opts ...Option) *mcp.Server {
 		// set is fixed at startup, so there is never a list change to
 		// announce: ListChanged stays false.
 		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
-	}
-	for _, opt := range opts {
-		opt(serverOpts)
+		Logger:       logger,
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: Name, Version: version}, serverOpts)
+	srv.AddReceivingMiddleware(toolDeadline(toolTimeout))
 	s.register(srv)
 	return srv
 }
 
+// ToolTimeout is the longest one tool call may run, from the moment the server
+// reads it to the moment it answers — every HTTP attempt, every retry wait,
+// and for compare_places every place, together.
+//
+// ⚠️ IT IS ONE DEADLINE FOR THE WHOLE CALL, NOT PER REQUEST. The retry budget
+// (retryBudget) caps only the SLEEPS inside one HTTP call; each attempt can
+// still take the HTTP timeout, and compare_places makes up to five calls. A
+// deadline on the call's context bounds all of it: when it runs out, the
+// request in flight is cancelled and the tool answers with what it has.
+// internal/commands/mcp.go sizes its drain wait from this value.
+const ToolTimeout = 30 * time.Second
+
+// toolTimeout is ToolTimeout as a variable, so a test can make it short.
+var toolTimeout = ToolTimeout
+
+// toolDeadline puts the per-call deadline on every tools/call request. Other
+// methods (initialize, tools/list) answer from memory and get none.
+func toolDeadline(timeout time.Duration) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/call" || timeout <= 0 {
+				return next(ctx, method, req)
+			}
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return next(ctx, method, req)
+		}
+	}
+}
+
 // register adds every tool to srv. It is the one place to look for the tool
-// set; each later tool file adds one line here.
+// set: one line per tool file.
 func (s *server) register(srv *mcp.Server) {
 	s.registerGeo(srv)     // find_place, browse_places, place_at_point — free
 	s.registerMeta(srv)    // coverage, filters, usage — free

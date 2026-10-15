@@ -96,7 +96,7 @@ func (f *fakeAPI) factory(t *testing.T) ClientFactory {
 // ends.
 func connect(t *testing.T, factory ClientFactory) *mcp.ClientSession {
 	t.Helper()
-	return connectServer(t, New(factory, testVersion))
+	return connectServer(t, New(factory, testVersion, nil))
 }
 
 // connectServer is connect for a server the test built itself — a probe tool

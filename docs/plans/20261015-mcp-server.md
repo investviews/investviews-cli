@@ -317,7 +317,7 @@
 - Create: `internal/commands/mcp.go`
 - Create: `internal/commands/mcp_test.go`
 - Modify: `internal/commands/commands.go` (add to `All`)
-- Modify: `internal/mcpserver/server.go` (`WithLogger` option, so SDK logs reach stderr)
+- Modify: `internal/mcpserver/server.go` (a `*slog.Logger` parameter on `New`, nil discards, so SDK logs reach stderr)
 
 ⚠️ The SDK closes a stdio session the moment stdin ends and drops answers still being built, even
 the one to `initialize`. Piped input (`investviews mcp < requests.jsonl`, a smoke test) got an empty
