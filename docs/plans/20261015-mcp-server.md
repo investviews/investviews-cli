@@ -177,13 +177,13 @@
 - Create: `internal/mcpserver/server_test.go`
 - Create: `internal/mcpserver/helpers_test.go`
 
-- [ ] write test: connect a client over the in-memory transport; `initialize` returns server name
+- [x] write test: connect a client over the in-memory transport; `initialize` returns server name
       `investviews` and the given version; `tools/list` returns an empty list
-- [ ] add `github.com/modelcontextprotocol/go-sdk@v1.8.0` to `go.mod`
-- [ ] create `mcpserver.New(newClient, version)`
-- [ ] create test helper: fake API (`httptest`, records requests) + connected client session,
+- [x] add `github.com/modelcontextprotocol/go-sdk@v1.8.0` to `go.mod`
+- [x] create `mcpserver.New(newClient, version)`
+- [x] create test helper: fake API (`httptest`, records requests) + connected client session,
       reused by later tasks
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 2: Server instructions
 
