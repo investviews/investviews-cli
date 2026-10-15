@@ -347,13 +347,16 @@ match (60 s cap). A real agent keeps stdin open and never hits this.
 
 ### Task 11: Verify acceptance criteria
 
-- [ ] verify all 9 tools from the Solution Overview exist, with annotations and descriptions that
+- [x] verify all 9 tools from the Solution Overview exist, with annotations and descriptions that
       state free or metered
-- [ ] verify no-token, bad-token, quota, rate-limit and validation errors all come back as
+- [x] verify no-token, bad-token, quota, rate-limit and validation errors all come back as
       `isError` results, never protocol errors
-- [ ] run full test suite: `go test ./...`
-- [ ] run `go vet ./...`
-- [ ] verify the existing CLI commands' tests are green and their output is unchanged
+- [x] run full test suite: `go test ./...`
+- [x] run `go vet ./...`
+- [x] verify the existing CLI commands' tests are green and their output is unchanged
+      (checked by `internal/mcpserver/acceptance_test.go`: every tool × no token, 401, 402, 429
+      and schema-invalid arguments; `git diff origin/main -- internal/commands/*_test.go` is empty
+      apart from the new `mcp_test.go`)
 
 ### Task 12: [Final] Update documentation
 
