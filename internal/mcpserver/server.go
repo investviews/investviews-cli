@@ -84,7 +84,8 @@ func New(newClient ClientFactory, version string) *mcp.Server {
 // register adds every tool to srv. It is the one place to look for the tool
 // set; each later tool file adds one line here.
 func (s *server) register(srv *mcp.Server) {
-	s.registerGeo(srv)   // find_place, browse_places, place_at_point — free
-	s.registerMeta(srv)  // coverage, filters, usage — free
-	s.registerStats(srv) // market_stats, price_history — METERED
+	s.registerGeo(srv)     // find_place, browse_places, place_at_point — free
+	s.registerMeta(srv)    // coverage, filters, usage — free
+	s.registerStats(srv)   // market_stats, price_history — METERED
+	s.registerCompare(srv) // compare_places — METERED, one call per place
 }

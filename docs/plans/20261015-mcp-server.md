@@ -295,16 +295,21 @@
 **Files:**
 - Create: `internal/mcpserver/compare.go`
 - Create: `internal/mcpserver/compare_test.go`
+- ➕ Modify: `internal/mcpserver/server.go` (register), `server_test.go` (`wantTools`)
+- ➕ note: `structuredContent` is `{rows, metered_calls, requests, stopped, not_asked, currencies}`,
+  not a bare list — MCP defines `structuredContent` as an object. The loop also stops on
+  `rate_limited` (over the retry budget the next place lands in the same window) and on a cancelled
+  call. A repeated geo_id is refused before any request. `isError` is set only when no place answered.
 
-- [ ] write tests: 3 places → 3 requests in order; one row per place with the three core columns;
+- [x] write tests: 3 places → 3 requests in order; one row per place with the three core columns;
       `structuredContent` is the list of rows; cost line says 3 metered calls
-- [ ] write tests: fewer than 2 or more than 5 places → `isError`, no request
-- [ ] write tests: 404 for place 2 → error row for it, places 1 and 3 still returned;
+- [x] write tests: fewer than 2 or more than 5 places → `isError`, no request
+- [x] write tests: 404 for place 2 → error row for it, places 1 and 3 still returned;
       `no_data` place → row with its availability reason
-- [ ] write test: 402 on place 2 → stop; result has row 1, an error row for place 2, and says how
+- [x] write test: 402 on place 2 → stop; result has row 1, an error row for place 2, and says how
       many metered calls were made
-- [ ] implement `compare_places`
-- [ ] run tests - must pass before next task
+- [x] implement `compare_places`
+- [x] run tests - must pass before next task
 
 ### Task 9: `investviews mcp` command
 
