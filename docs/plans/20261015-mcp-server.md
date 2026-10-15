@@ -317,13 +317,19 @@
 - Create: `internal/commands/mcp.go`
 - Create: `internal/commands/mcp_test.go`
 - Modify: `internal/commands/commands.go` (add to `All`)
+- Modify: `internal/mcpserver/server.go` (`WithLogger` option, so SDK logs reach stderr)
 
-- [ ] write test: the command runs the server on injected stdin/stdout; an `initialize` +
+⚠️ The SDK closes a stdio session the moment stdin ends and drops answers still being built, even
+the one to `initialize`. Piped input (`investviews mcp < requests.jsonl`, a smoke test) got an empty
+stdout. The command counts requests read vs responses written and holds stdin's EOF until they
+match (60 s cap). A real agent keeps stdin open and never hits this.
+
+- [x] write test: the command runs the server on injected stdin/stdout; an `initialize` +
       `tools/list` exchange returns all 9 tools; stdout holds only JSON-RPC lines
-- [ ] write test: SDK and command logs go to stderr, not stdout
-- [ ] write test: `investviews mcp --help` shows the config line for agents
-- [ ] implement the command with `mcp.IOTransport` over `cmd.InOrStdin()` / `cmd.OutOrStdout()`
-- [ ] run tests - must pass before next task
+- [x] write test: SDK and command logs go to stderr, not stdout
+- [x] write test: `investviews mcp --help` shows the config line for agents
+- [x] implement the command with `mcp.IOTransport` over `cmd.InOrStdin()` / `cmd.OutOrStdout()`
+- [x] run tests - must pass before next task
 
 ### Task 10: Register the server in the Claude Code plugin
 

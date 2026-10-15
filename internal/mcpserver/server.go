@@ -23,6 +23,7 @@ package mcpserver
 
 import (
 	_ "embed"
+	"log/slog"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -56,27 +57,44 @@ type server struct {
 	newClient ClientFactory
 }
 
+// Option changes how New builds the server. There is one today, WithLogger.
+type Option func(*mcp.ServerOptions)
+
+// WithLogger sends the SDK's own log lines (session connected, session ended,
+// a notification that failed) to l.
+//
+// ⚠️ l MUST NOT WRITE TO STDOUT when the server runs on stdio. Stdout IS the
+// protocol stream: one stray log line there is a frame the client cannot
+// parse, and most clients drop the whole connection on it. `investviews mcp`
+// points l at stderr, which every MCP client keeps as the server's log.
+// Without this option the SDK discards its logs.
+func WithLogger(l *slog.Logger) Option {
+	return func(o *mcp.ServerOptions) { o.Logger = l }
+}
+
 // New builds the MCP server. version is the build stamp
 // (internal/version.Version) and is what `initialize` reports, so a support
 // thread can ask the agent which build it is talking to.
 //
 // The server is returned unconnected: the caller picks the transport (stdio
 // for `investviews mcp`, in-memory for tests).
-func New(newClient ClientFactory, version string) *mcp.Server {
+func New(newClient ClientFactory, version string, opts ...Option) *mcp.Server {
 	s := &server{newClient: newClient}
 
-	srv := mcp.NewServer(
-		&mcp.Implementation{Name: Name, Version: version},
-		&mcp.ServerOptions{
-			Instructions: instructions,
-			// ⚠️ THE TOOLS CAPABILITY IS SET EXPLICITLY. The SDK only infers it
-			// once a tool is added, and a server that does not advertise it
-			// makes a well-behaved client skip tools/list entirely. The tool
-			// set is fixed at startup, so there is never a list change to
-			// announce: ListChanged stays false.
-			Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
-		},
-	)
+	serverOpts := &mcp.ServerOptions{
+		Instructions: instructions,
+		// ⚠️ THE TOOLS CAPABILITY IS SET EXPLICITLY. The SDK only infers it
+		// once a tool is added, and a server that does not advertise it
+		// makes a well-behaved client skip tools/list entirely. The tool
+		// set is fixed at startup, so there is never a list change to
+		// announce: ListChanged stays false.
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
+	}
+	for _, opt := range opts {
+		opt(serverOpts)
+	}
+
+	srv := mcp.NewServer(&mcp.Implementation{Name: Name, Version: version}, serverOpts)
 	s.register(srv)
 	return srv
 }

@@ -77,6 +77,7 @@ func All(deps Deps) []*cobra.Command {
 		NewStatsCmd(deps),
 		NewUsageCmd(deps),
 		NewCoverageCmd(deps),
+		NewMCPCmd(deps),
 	}
 }
 
