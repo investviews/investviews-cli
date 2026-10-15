@@ -259,15 +259,19 @@
 **Files:**
 - Create: `internal/mcpserver/stats.go`
 - Create: `internal/mcpserver/stats_test.go`
+- ➕ Modify: `internal/mcpserver/server.go` (register), `server_test.go` (`wantTools`)
+- ➕ note: shared pieces for Tasks 7–8 live in `stats.go`: `territoryArgs` (+ `params()`,
+  `selectorText()`), `statsFilterArgs` (+ `apply()`), `availabilityText` / `verdictText` /
+  `reasonMove`, `coreFigures`, `territoryText`, `appliedFiltersText`
 
-- [ ] write tests: `geo_id` / `h3` / point selectors each send the right query; filters map to
+- [x] write tests: `geo_id` / `h3` / point selectors each send the right query; filters map to
       query names; unset optional numbers are not sent; text names "median asking price per m²",
       "median asking price", "median size"; cost line present
-- [ ] write tests for `Availability`: `ok`, and `no_data` with reason, message and nonempty periods
-- [ ] write error tests: two selectors → `isError` with no request sent; 402 → quota `isError`;
+- [x] write tests for `Availability`: `ok`, and `no_data` with reason, message and nonempty periods
+- [x] write error tests: two selectors → `isError` with no request sent; 402 → quota `isError`;
       429 → rate-limit `isError` returned within the capped wait
-- [ ] implement `market_stats`
-- [ ] run tests - must pass before next task
+- [x] implement `market_stats`
+- [x] run tests - must pass before next task
 
 ### Task 7: Paid tool — `price_history`
 
