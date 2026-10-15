@@ -453,3 +453,271 @@ func TestMarketStatsIsAnnouncedMetered(t *testing.T) {
 	}
 	t.Fatal("market_stats is not in tools/list")
 }
+
+// ── price_history ────────────────────────────────────────────────────────────
+
+// historyHeaders is what /stats/history sends: the "history" group, a budget
+// separate from "current".
+func historyHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Quota-Group", "history")
+	w.Header().Set("X-Quota-Limit", "5000")
+	w.Header().Set("X-Quota-Used", "12")
+	w.Header().Set("X-Quota-Reset", "2026-10-11T12:30:25Z")
+	w.Header().Set("X-Request-Id", "req-history")
+}
+
+func historyJSON(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		historyHeaders(w)
+		writeBody(w, http.StatusOK, body)
+	}
+}
+
+// historyReply is three periods of one place: two with a figure (one of them
+// estimated and low confidence), one empty with its own verdict.
+const historyReply = `{"currency":"EUR","resolution":null,
+ "territory":{"selector":"geo_id","hex_count":0,"geo_id":"R344953","grain":"geo",
+   "place":{"name":"València","level":"city","country":"es"}},
+ "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":[],
+   "units":{"size":"m2","price":"USD"},"note":""},
+ "series":[
+  {"period":"2026-06-01","granularity":"month","window_start":"2026-06-01","window_end":"2026-06-30",
+   "as_of":"2026-06-30","fx_date":"2026-06-15",
+   "stats":[{"name":"València","estimated":false,"low_confidence":false,
+     "median_price_per_sqm":3050,"median_price":280000,"median_area":91}],
+   "availability":{"status":"ok","reason":null,"message":""}},
+  {"period":"2026-07-01","granularity":"month","window_start":"2026-07-01","window_end":"2026-07-31",
+   "as_of":"2026-07-31","fx_date":"2026-07-15",
+   "stats":[{"name":"València","estimated":true,"low_confidence":true,
+     "median_price_per_sqm":3090,"median_price":282500,"median_area":90.5}],
+   "availability":{"status":"ok","reason":null,"message":""}},
+  {"period":"2026-08-01","granularity":"month","window_start":"2026-08-01","window_end":"2026-08-31",
+   "as_of":"2026-08-31","fx_date":"2026-08-15","stats":[],
+   "availability":{"status":"no_data","reason":"below_minimum_sample","message":"Too few listings."}}],
+ "series_note":"Each point is an independent aggregate; points are NOT additive.",
+ "snapshot":{"as_of":"2026-08-01","built":"2026-09-05","earliest_period":"2024-03-01"},
+ "availability":{"status":"ok","reason":null,"message":"","searched_from":"2024-03-01",
+   "earliest_nonempty_period":"2024-03-01","latest_nonempty_period":"2026-07-01"}}`
+
+func TestPriceHistoryPassesTheRangeThrough(t *testing.T) {
+	session, fake := connectFake(t, historyJSON(historyReply))
+
+	res := callTool(t, session, "price_history", map[string]any{
+		"geo_id": "R344953", "from": "2026-06", "to": "2026-08-15", "rooms": []string{"2"},
+	})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+	if got := fake.last().Path; got != "/public/v1/stats/history" {
+		t.Errorf("path = %q, want /public/v1/stats/history", got)
+	}
+	wantQuery(t, fake.last(), map[string]string{
+		"geo_id": "R344953", "from": "2026-06", "to": "2026-08-15", "rooms": "2",
+	})
+}
+
+// from and to omitted are not sent: the API's own default (the last 12
+// periods) applies, and nothing local invents a range.
+func TestPriceHistoryWithoutARangeSendsNone(t *testing.T) {
+	session, fake := connectFake(t, historyJSON(historyReply))
+
+	res := callTool(t, session, "price_history", map[string]any{"h3": []string{"871f1d489ffffff"}})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+	wantQuery(t, fake.last(), map[string]string{"h3": "871f1d489ffffff"})
+}
+
+func TestPriceHistoryGivesOneLinePerPeriod(t *testing.T) {
+	session, _ := connectFake(t, historyJSON(historyReply))
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953"})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+
+	var payload struct {
+		Series []struct {
+			Period string            `json:"period"`
+			Stats  []json.RawMessage `json:"stats"`
+		} `json:"series"`
+		SeriesNote string `json:"series_note"`
+	}
+	structured(t, res, &payload)
+	if len(payload.Series) != 3 || payload.Series[2].Period != "2026-08-01" || len(payload.Series[2].Stats) != 0 {
+		t.Errorf("structuredContent series = %+v, want the three periods as sent", payload.Series)
+	}
+
+	text := textOf(t, res)
+	mustContain(t, text, "València (city, es) — geo_id R344953")
+	mustContain(t, text, "3 period(s) · figures in EUR")
+	mustContain(t, text, "median of ASKING prices")
+	mustContain(t, text, "- 2026-06-01 (month, window 2026-06-01 → 2026-06-30, as_of 2026-06-30): "+
+		"median asking price per m²: 3050 EUR · median asking price: 280000 EUR · median size: 91 m²\n")
+	mustContain(t, text, "- 2026-07-01 (month, window 2026-07-01 → 2026-07-31, as_of 2026-07-31): "+
+		"~ median asking price per m²: 3090 EUR · median asking price: 282500 EUR · median size: 90.5 m² · low confidence\n")
+	mustContain(t, text, "- 2026-08-01 (month, window 2026-08-01 → 2026-08-31, as_of 2026-08-31): "+
+		"no figures — availability: no_data — below_minimum_sample: Too few listings.\n")
+	mustContain(t, text, "Rows marked ~ are NOT that cell's own figures")
+	mustContain(t, text, "POINTS ARE NOT ADDITIVE")
+	mustContain(t, text, "never sum them")
+	mustContain(t, text, "points are NOT additive.")
+	mustContain(t, text, "cost: 1 metered request (group history, 12 of 5000 used this cycle)")
+}
+
+// A period holding several cells has no single figure: the text says so and
+// points at the payload instead of averaging the cells.
+func TestPriceHistoryMultiCellPeriodIsNotAveraged(t *testing.T) {
+	reply := `{"currency":"USD","territory":{"selector":"h3","hex_count":2,"grain":"h3"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy"},
+	 "series":[{"period":"2026-08-01","granularity":"rolling_3m","window_start":"2026-06-01",
+	   "window_end":"2026-08-31","as_of":"2026-08-31","stats":[
+	   {"h3":"871f1d489ffffff","median_price_per_sqm":3000},
+	   {"h3":"871f1d48bffffff","median_price_per_sqm":4000}]}],
+	 "series_note":"","snapshot":{}}`
+	session, _ := connectFake(t, historyJSON(reply))
+
+	res := callTool(t, session, "price_history", map[string]any{
+		"h3": []string{"871f1d489ffffff", "871f1d48bffffff"},
+	})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "2 cells — no single figure for the period; per-cell figures in structuredContent.series[0].stats")
+	if strings.Contains(text, "3500") {
+		t.Errorf("text averaged the cells:\n%s", text)
+	}
+}
+
+// An empty series is a normal answer with the API's reason and the way back
+// to periods that hold data.
+func TestPriceHistoryEmptySeries(t *testing.T) {
+	reply := `{"currency":"EUR","territory":{"selector":"geo_id","geo_id":"R344953","grain":"geo"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy"},
+	 "series":[],"series_note":"","snapshot":{"earliest_period":"2024-03-01"},
+	 "availability":{"status":"no_data","reason":"period_not_built","message":"Not built yet.",
+	   "searched_from":"2026-09-01","earliest_nonempty_period":null,"latest_nonempty_period":null}}`
+	session, _ := connectFake(t, historyJSON(reply))
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953", "from": "2026-09"})
+	if res.IsError {
+		t.Fatalf("an empty series is a normal answer, got isError: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "No periods in this range. That is a normal answer")
+	mustContain(t, text, "availability: no_data — period_not_built: Not built yet.")
+	mustContain(t, text, "History goes back to 2024-03-01 — move from earlier, or drop it for the last 12 periods.")
+}
+
+// ⚠️ A range over the cap is refused with 422, not truncated. The tool error
+// says what the API said AND what to do: split the range.
+func TestPriceHistoryRangeOverTheCapSaysSplitIt(t *testing.T) {
+	session, fake := connectFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		historyHeaders(w)
+		writeBody(w, http.StatusUnprocessableEntity, `{"error":"invalid_parameter",`+
+			`"message":"The range spans 30 periods; the cap is 24.","parameter":"from",`+
+			`"docs_url":"https://docs.investviews.ai/errors.html#invalid_parameter"}`)
+	})
+
+	res := callTool(t, session, "price_history", map[string]any{
+		"geo_id": "R344953", "from": "2024-01", "to": "2026-06",
+	})
+	if !res.IsError {
+		t.Fatalf("a 422 must come back with isError, got: %s", textOf(t, res))
+	}
+	if fake.hits() != 1 {
+		t.Errorf("hits = %d, want 1 (a 422 is not retried)", fake.hits())
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "The range spans 30 periods; the cap is 24.")
+	mustContain(t, text, "https://docs.investviews.ai/errors.html#invalid_parameter")
+	mustContain(t, text, "Split from..to into ranges of 24 periods or fewer and call once per range")
+}
+
+// The split note belongs to the range refusal alone: the cell budget's 422
+// keeps its own hint, and is not told to split a range it never had.
+func TestPriceHistoryCellBudgetIsNotARangeError(t *testing.T) {
+	session, _ := connectFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		historyHeaders(w)
+		writeBody(w, http.StatusUnprocessableEntity, `{"error":"too_many_hexes",`+
+			`"message":"Too many cells.","docs_url":"d"}`)
+	})
+
+	res := callTool(t, session, "price_history", map[string]any{"lat": 39.47, "lng": -0.376, "radius_km": 50})
+	if !res.IsError {
+		t.Fatalf("a 422 must come back with isError, got: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "per-request cell budget")
+	if strings.Contains(text, "Split from..to") {
+		t.Errorf("cell-budget error was told to split the range:\n%s", text)
+	}
+}
+
+func TestPriceHistoryRefusesTwoSelectorsWithoutARequest(t *testing.T) {
+	session, fake := connectFake(t, historyJSON(historyReply))
+
+	res := callTool(t, session, "price_history", map[string]any{
+		"geo_id": "R344953", "h3": []string{"871f1d489ffffff"},
+	})
+	if !res.IsError {
+		t.Fatalf("two selectors must be refused, got: %s", textOf(t, res))
+	}
+	if fake.hits() != 0 {
+		t.Errorf("sent %d requests, want 0 — a refused selector costs nothing", fake.hits())
+	}
+	if text := textOf(t, res); strings.Contains(text, "--geo-id") || strings.Contains(text, "--h3") {
+		t.Errorf("error text names CLI flags:\n%s", text)
+	}
+}
+
+func TestPriceHistoryIsAnnouncedMetered(t *testing.T) {
+	session, _ := connectFake(t, nil)
+
+	list, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	for _, tool := range list.Tools {
+		if tool.Name != "price_history" {
+			continue
+		}
+		if !strings.HasPrefix(tool.Description, "METERED") || !strings.Contains(tool.Description, `"history"`) {
+			t.Errorf("description must open with METERED and name the history group: %q", tool.Description)
+		}
+		if !strings.Contains(tool.Description, "NOT ADDITIVE") {
+			t.Errorf("description does not say points are not additive: %q", tool.Description)
+		}
+		a := tool.Annotations
+		if a == nil || !a.ReadOnlyHint || !a.IdempotentHint || a.OpenWorldHint == nil || !*a.OpenWorldHint {
+			t.Errorf("annotations = %+v, want read-only, idempotent, open-world", a)
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal input schema: %v", err)
+		}
+		var schema struct {
+			Required   []string                   `json:"required"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode input schema: %v", err)
+		}
+		if len(schema.Required) != 0 {
+			t.Errorf("requires %v, want nothing required", schema.Required)
+		}
+		var got []string
+		for name := range schema.Properties {
+			got = append(got, name)
+		}
+		sort.Strings(got)
+		want := []string{"ad_sub_type", "ad_type", "currency", "from", "geo_id", "h3", "lat", "lng",
+			"max_price_usd", "max_size", "min_price_usd", "min_size", "radius_km", "res", "rooms", "to"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("properties = %v, want %v", got, want)
+		}
+		return
+	}
+	t.Fatal("price_history is not in tools/list")
+}

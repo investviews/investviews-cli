@@ -278,12 +278,17 @@
 **Files:**
 - Modify: `internal/mcpserver/stats.go`
 - Modify: `internal/mcpserver/stats_test.go`
+- ➕ Modify: `internal/mcpserver/result.go` (`failNote` — `fail` plus the tool's own next move),
+  `server.go` (register comment), `server_test.go` (`wantTools`)
+- ➕ note: the 24-period 422 has no error code of its own in the contract; `rangeRefused` treats a
+  422 naming `from`/`to`, or any 422 that is not `too_many_hexes` / a report code, as the range
+  refusal and appends the split-the-range note. The cap is quoted, not checked locally.
 
-- [ ] write tests: `from`/`to` passed through; text gives one line per period with median asking
+- [x] write tests: `from`/`to` passed through; text gives one line per period with median asking
       price per m²; says points are not additive; cost line names the history group
-- [ ] write error test: range over 24 periods → API 422 → `isError` that says to split the range
-- [ ] implement `price_history`
-- [ ] run tests - must pass before next task
+- [x] write error test: range over 24 periods → API 422 → `isError` that says to split the range
+- [x] implement `price_history`
+- [x] run tests - must pass before next task
 
 ### Task 8: Workflow tool — `compare_places`
 

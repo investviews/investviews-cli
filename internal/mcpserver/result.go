@@ -85,6 +85,16 @@ func fail(err error) (*mcp.CallToolResult, any, error) {
 	return res, nil, nil
 }
 
+// failNote is fail with one more line: the tool's own next move for an error
+// whose generic hint is too vague to act on (price_history's range cap).
+func failNote(err error, note string) (*mcp.CallToolResult, any, error) {
+	res, out, failErr := fail(err)
+	if tc, isText := res.Content[0].(*mcp.TextContent); isText {
+		tc.Text += "\n" + note
+	}
+	return res, out, failErr
+}
+
 // errorText is the text of a failed call.
 //
 //   - An API error is its Error() — message, code and docs_url — plus Hint(),

@@ -30,7 +30,7 @@ func TestInitializeReportsNameAndVersion(t *testing.T) {
 var wantTools = []string{
 	"find_place", "browse_places", "place_at_point",
 	"coverage", "filters", "usage",
-	"market_stats",
+	"market_stats", "price_history",
 }
 
 func TestToolsListNamesEveryTool(t *testing.T) {

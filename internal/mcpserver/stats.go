@@ -12,7 +12,7 @@ import (
 	"github.com/investviews/investviews-cli/internal/api"
 )
 
-// The metered stats tools. They are the only tools that spend quota, and the
+// The metered stats tools: market_stats and price_history. They are the only tools that spend quota, and the
 // only ones whose answers a user will quote — so their text names the
 // statistic every time, and an empty answer says WHY it is empty.
 //
@@ -40,6 +40,18 @@ Two selectors are refused before any request is sent, so the mistake costs nothi
 
 Resolve the place with the free tools first and spend this once. The figures describe one PERIOD (cite period, window and as_of), never today. An empty answer is normal, not a zero: its availability reason says what to do next. ⚠️ Price filters are USD whatever currency displays.`,
 	}, s.marketStats)
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "price_history",
+		Annotations: readOnly("Market figures period by period"),
+		Description: `METERED — one call against the "history" quota group, a SEPARATE budget from "current". The same figures as market_stats, once per period across a range: median asking price per m², median asking price and median size for each period.
+
+Name the territory exactly as for market_stats: ONE of geo_id, h3, or lat + lng + radius_km (res for the circle only). Two selectors are refused before any request is sent.
+
+from and to are a period (2025-02) or any date inside one. from omitted gives the LAST 12 PERIODS, not the whole history; to omitted is the newest built period. A range longer than 24 periods is REFUSED, not truncated — split it into ranges of 24 periods or fewer, one call each.
+
+⚠️ POINTS ARE NOT ADDITIVE. Each point is an independent aggregate over its own window, and rolling_3m windows overlap by two months. Compare points and draw a line; never sum them. Use this, not market_stats, when market_stats came back empty with period_not_built.`,
+	}, s.priceHistory)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +231,167 @@ func emptyMovesText(args territoryArgs, territory api.Territory) string {
 	}
 	moves = append(moves, "wider filters")
 	return "Next: " + strings.Join(moves, ", or ") + ".\n"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// price_history
+// ─────────────────────────────────────────────────────────────────────────────
+
+// priceHistoryArgs is market_stats' arguments plus the period range. from and
+// to are passed through as given: the API accepts a period or any date inside
+// one, and clamps an omitted bound to what exists.
+type priceHistoryArgs struct {
+	territoryArgs
+	statsFilterArgs
+	From string `json:"from,omitempty" jsonschema:"earliest period, YYYY-MM or any date inside it; omitted, the last 12 periods"`
+	To   string `json:"to,omitempty" jsonschema:"latest period, YYYY-MM or any date inside it; omitted, the newest built period"`
+}
+
+// maxHistoryPeriods is the API's cap on one /stats/history range. It is only
+// QUOTED here, in the split-the-range note: the API is the authority, and a
+// local check would refuse a range the server may one day accept.
+const maxHistoryPeriods = 24
+
+func (s *server) priceHistory(ctx context.Context, _ *mcp.CallToolRequest, args priceHistoryArgs) (*mcp.CallToolResult, any, error) {
+	params := api.HistoryParams{
+		StatsParams: args.territoryArgs.params(),
+		From:        strings.TrimSpace(args.From),
+		To:          strings.TrimSpace(args.To),
+	}
+	args.statsFilterArgs.apply(&params.StatsParams)
+
+	c, err := s.client()
+	if err != nil {
+		return fail(err)
+	}
+	resp, err := c.StatsHistory(ctx, params)
+	if err != nil {
+		if rangeRefused(err) {
+			return failNote(err, splitRangeNote)
+		}
+		return fail(err)
+	}
+	return ok(resp, historyText(args, resp), resp.Meta)
+}
+
+// splitRangeNote is the move for a refused range. The API's own message says
+// WHAT is wrong; this says what the next calls are.
+var splitRangeNote = fmt.Sprintf("price_history answers at most %d periods per call, and a longer range is "+
+	"refused, not truncated. Split from..to into ranges of %d periods or fewer and call once per range "+
+	"(each call is one metered request against the history group).", maxHistoryPeriods, maxHistoryPeriods)
+
+// rangeRefused reports the 422 /stats/history sends for a range over the cap.
+//
+// ⚠️ THE CONTRACT GIVES THIS REFUSAL NO CODE OF ITS OWN. It is a 422 that is
+// neither too_many_hexes (the cell budget, with its own hint) nor a report
+// code, so it is recognised by status plus "not one of those" — or by the
+// parameter it names, when the server names from or to.
+func rangeRefused(err error) bool {
+	apiErr, isAPI := api.AsAPIError(err)
+	if !isAPI {
+		return false
+	}
+	if apiErr.Parameter == "from" || apiErr.Parameter == "to" {
+		return true
+	}
+	return apiErr.Status == 422 &&
+		apiErr.Code != api.CodeTooManyHexes &&
+		apiErr.Code != api.CodeReportsUnavailableForCountry
+}
+
+func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
+	var b strings.Builder
+	b.WriteString(territoryText(resp.Territory))
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "%d period(s) · figures in %s\n", len(resp.Series), orDash(resp.Currency))
+	b.WriteString(appliedFiltersText(resp.Filters))
+	b.WriteString("\n\n")
+
+	if len(resp.Series) == 0 {
+		b.WriteString("No periods in this range. That is a normal answer — not an error, and not a price of zero.\n")
+		if resp.Availability != nil {
+			b.WriteString(availabilityText(resp.Availability))
+		}
+		if resp.Snapshot.EarliestPeriod != "" {
+			fmt.Fprintf(&b, "History goes back to %s — move from earlier, or drop it for the last 12 periods.\n",
+				resp.Snapshot.EarliestPeriod)
+		}
+		return b.String()
+	}
+
+	b.WriteString(medianNote)
+	b.WriteString("\n\n")
+	for i, point := range resp.Series {
+		b.WriteString(historyPointText(i, point, resp.Currency))
+	}
+
+	// A series whose every period came back empty is a column of dashes; the
+	// reason is the only line in it an agent can act on.
+	if resp.Availability != nil && !anyPointRows(resp.Series) {
+		b.WriteString("\n")
+		b.WriteString(availabilityText(resp.Availability))
+	}
+	b.WriteString(seriesFootnotes(resp.Series))
+	b.WriteString("\n⚠️ POINTS ARE NOT ADDITIVE — each is an independent aggregate over its own window. Compare them, never sum them.\n")
+	if note := strings.TrimSpace(resp.SeriesNote); note != "" {
+		b.WriteString(note)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// historyPointText is one line per period, led by the period and its window
+// so the agent cites WHICH window a figure describes.
+//
+// ⚠️ ONE LINE IS ONLY HONEST WHILE A PERIOD HOLDS ONE ROW. A multi-cell series
+// has no single figure per period, and averaging the cells here would invent
+// one — so such a period names its row count and points at the payload.
+func historyPointText(i int, point api.HistoryPoint, currency string) string {
+	head := fmt.Sprintf("- %s (%s, window %s → %s, as_of %s)", orDash(point.Period), orDash(point.Granularity),
+		orDash(point.WindowStart), orDash(point.WindowEnd), orDash(point.AsOf))
+	switch len(point.Stats) {
+	case 0:
+		if point.Availability != nil {
+			return fmt.Sprintf("%s: no figures — %s\n", head, verdictText(*point.Availability))
+		}
+		return head + ": no figures\n"
+	case 1:
+		row := point.Stats[0]
+		mark := ""
+		if row.Estimated {
+			mark = "~ "
+		}
+		line := fmt.Sprintf("%s: %s%s", head, mark, strings.Join(coreFigures(row, currency), " · "))
+		if row.LowConfidence != nil && *row.LowConfidence {
+			line += " · low confidence"
+		}
+		return line + "\n"
+	default:
+		return fmt.Sprintf("%s: %d cells — no single figure for the period; per-cell figures in structuredContent.series[%d].stats\n",
+			head, len(point.Stats), i)
+	}
+}
+
+// anyPointRows reports whether any period of a series carries a figure.
+func anyPointRows(series []api.HistoryPoint) bool {
+	for _, point := range series {
+		if len(point.Stats) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// seriesFootnotes is statFootnotes over every period's rows, said once.
+func seriesFootnotes(series []api.HistoryPoint) string {
+	var rows []api.Stat
+	for _, point := range series {
+		rows = append(rows, point.Stats...)
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	return statFootnotes(rows)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
