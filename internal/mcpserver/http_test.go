@@ -770,7 +770,10 @@ func TestHTTPPreflightIsAnsweredWithoutAToken(t *testing.T) {
 		t.Errorf("Allow-Methods = %q, want it to include POST", got)
 	}
 	allowed := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers"))
-	for _, h := range []string{"authorization", "content-type", "mcp-session-id", "mcp-protocol-version", "last-event-id"} {
+	// mcp-method and mcp-name: the SDK requires both on every request at
+	// protocol 2026-07-28, so a browser that cannot send them cannot call tools.
+	for _, h := range []string{"authorization", "content-type", "mcp-session-id", "mcp-protocol-version",
+		"last-event-id", "mcp-method", "mcp-name"} {
 		if !strings.Contains(allowed, h) {
 			t.Errorf("Allow-Headers = %q, want it to include %s", allowed, h)
 		}
