@@ -139,9 +139,11 @@ type hostedFlags struct {
 }
 
 // shutdownTimeout is how long a stopping hosted server waits for requests in
-// flight. It is longer than one tool call may run, so a call that started
-// before the stop still gets its answer.
-const shutdownTimeout = mcpserver.ToolTimeout + 5*time.Second
+// flight. A request accepted just before the stop first has its token checked
+// (up to VerifyTimeout) and only then starts its tool call (up to
+// ToolTimeout), so the wait covers both plus a few seconds to write the
+// answer. The systemd unit's TimeoutStopSec must stay above it.
+const shutdownTimeout = mcpserver.VerifyTimeout + mcpserver.ToolTimeout + 5*time.Second
 
 // serveHTTP runs the hosted mode until the command's context ends or the
 // process gets SIGINT or SIGTERM (a service manager's stop).

@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/investviews/investviews-cli/internal/api"
+	"github.com/investviews/investviews-cli/internal/mcpserver"
 	"github.com/investviews/investviews-cli/internal/version"
 )
 
@@ -572,5 +573,17 @@ func TestMCPHTTPRefusesANegativeTokenCacheTTL(t *testing.T) {
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "token-cache-ttl") {
 		t.Errorf("err = %v, want one that names --token-cache-ttl", err)
+	}
+}
+
+// A request accepted just before SIGTERM first has its token checked (up to
+// mcpserver.VerifyTimeout) and only then starts its tool call (up to
+// mcpserver.ToolTimeout). The stop must wait for both, plus time to write the
+// answer.
+func TestShutdownTimeoutCoversVerifyAndToolCall(t *testing.T) {
+	need := mcpserver.VerifyTimeout + mcpserver.ToolTimeout
+	if shutdownTimeout <= need {
+		t.Fatalf("shutdownTimeout = %s, want more than verify %s + tool %s = %s",
+			shutdownTimeout, mcpserver.VerifyTimeout, mcpserver.ToolTimeout, need)
 	}
 }

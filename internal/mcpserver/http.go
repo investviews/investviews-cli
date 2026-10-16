@@ -90,9 +90,10 @@ const (
 	// one minute.
 	TokenCacheTTL = 60 * time.Second
 
-	// verifyTimeout bounds one token check. The check is one small GET; a
+	// VerifyTimeout bounds one token check. The check is one small GET; a
 	// slow answer is an outage (503), not a reason to hold the agent.
-	verifyTimeout = 10 * time.Second
+	// internal/commands/mcp.go adds it to ToolTimeout to size its stop wait.
+	VerifyTimeout = 10 * time.Second
 
 	// tokenPrefix, minTokenLen and maxTokenLen describe a plausible API
 	// token, for the pre-filter in plausibleToken. Today's tokens are
@@ -154,7 +155,7 @@ type HTTPOptions struct {
 	CacheTTL time.Duration
 
 	// HTTPClient sends the token checks. Nil uses http.DefaultClient. Each
-	// check is bounded by verifyTimeout either way.
+	// check is bounded by VerifyTimeout either way.
 	HTTPClient *http.Client
 
 	// now is the clock for the token cache. Tests set it.
@@ -351,7 +352,7 @@ func newVerifier(apiURL, userAgent string, ttl time.Duration, httpClient *http.C
 		usageURL:  strings.TrimRight(apiURL, "/") + string(api.EndpointUsage),
 		userAgent: userAgent,
 		http:      httpClient,
-		timeout:   verifyTimeout,
+		timeout:   VerifyTimeout,
 		logger:    logger,
 		cache:     newTokenCache(ttl, now),
 	}
