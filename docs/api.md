@@ -32,10 +32,41 @@ Everything below was derived from that served document and checked against the l
 | `stats current` | `GET /stats/current` | `current` | **yes** |
 | `stats history` | `GET /stats/history` | `history` | **yes** |
 
+`GET /meta/filters` (`metadata`, free) has no CLI command; only the MCP `filters` tool calls it.
+
 `GET /ping` and `GET /openapi.yaml` are also `metadata`; `/ping` is the only endpoint that answers
 without a token. The CLI does not expose either.
 
 The base URL is `https://api.investviews.ai/public/v1`, overridable with `INVESTVIEWS_API_URL`.
+
+### MCP tools and the endpoints they call
+
+`investviews mcp` serves the same API as MCP tools (code in `internal/mcpserver`). Each tool calls
+the same typed client as the matching command, so the same billing applies.
+
+| tool | endpoint | quota group | metered |
+|---|---|---|---|
+| `find_place` | `GET /geo/search` | `metadata` | no |
+| `browse_places` | `GET /geo` | `metadata` | no |
+| `place_at_point` | `GET /geo/lookup` | `metadata` | no |
+| `coverage` | `GET /coverage` | `metadata` | no |
+| `filters` | `GET /meta/filters` | `metadata` | no |
+| `usage` | `GET /usage` | `metadata` | no |
+| `market_stats` | `GET /stats/current` | `current` | **yes**, 1 call |
+| `price_history` | `GET /stats/history` | `history` | **yes**, 1 call |
+| `compare_places` | `GET /stats/current`, once per place, in order | `current` | **yes**, 1 call per place (2 to 5) |
+
+- `GET /geo/{geo_id}/hexes` has no tool on purpose: a list of H3 cells is not useful in a chat.
+  Use `geo hexes` on the command line.
+- `place_at_point` takes `res`, the H3 resolution, as the API does — not `level`.
+- `compare_places` stops early only on a token, subscription, quota or rate-limit refusal, a refused
+  filter value (every place shares the filters), or the call's deadline. It then still returns the
+  rows it already paid for, plus how many metered calls it spent.
+- The MCP client waits at most about 10 seconds between retries per HTTP request, so a `429` comes
+  back as a tool error quickly. The CLI waits up to 2 minutes.
+- Every MCP tool call has one 30-second deadline, covering every HTTP attempt and retry wait — for
+  `compare_places`, every place together. When it runs out, the request in flight is cancelled and
+  `compare_places` stops with `stopped: timed_out`, keeping the rows it already has.
 
 ### Billing, in the contract's own words
 

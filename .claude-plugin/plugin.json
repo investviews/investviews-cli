@@ -1,7 +1,7 @@
 {
   "name": "investviews",
   "displayName": "InvestViews",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Answer real-estate market questions for a named place: resolve the geography for free, then spend one metered call for medians, price per m2 and history.",
   "author": {
     "name": "InvestViews",
@@ -18,5 +18,11 @@
     "geography",
     "h3",
     "api"
-  ]
+  ],
+  "mcpServers": {
+    "investviews": {
+      "command": "investviews",
+      "args": ["mcp"]
+    }
+  }
 }

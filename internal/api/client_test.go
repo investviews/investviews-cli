@@ -260,6 +260,93 @@ func TestNon429ClientErrorsAreNeverRetried(t *testing.T) {
 	}
 }
 
+// A retry budget turns a long wait into a fast error. The MCP server sets one:
+// an agent's tool call that blocks for two minutes on a 429 reads as hung.
+func TestRetryBudgetGivesUpInsteadOfWaiting(t *testing.T) {
+	rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		meteredHeaders(w)
+		writeJSON(w, 429, `{"error":"rate_limited","message":"slow down","docs_url":"d","retry_after":30,"limit":300,"group":"current"}`)
+	})
+
+	_, err := rec.client.WithRetryBudget(10*time.Second).StatsCurrent(context.Background(), StatsParams{GeoID: "es"})
+	var rate *RateLimitError
+	if !errors.As(err, &rate) {
+		t.Fatalf("err = %v, want *RateLimitError", err)
+	}
+	if rec.hits() != 1 || len(rec.sleeps) != 0 {
+		t.Errorf("hits = %d, sleeps = %v — a 30s wait over a 10s budget must not be slept", rec.hits(), rec.sleeps)
+	}
+}
+
+// The budget is a TOTAL across retries, not a cap per wait: three 4s waits fit
+// under 10s one at a time, but not together.
+func TestRetryBudgetIsATotalAcrossRetries(t *testing.T) {
+	rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "4")
+		meteredHeaders(w)
+		writeJSON(w, 429, `{"error":"rate_limited","message":"slow down","docs_url":"d","retry_after":4,"limit":300,"group":"current"}`)
+	})
+
+	_, err := rec.client.WithRetryBudget(10*time.Second).StatsCurrent(context.Background(), StatsParams{GeoID: "es"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	want := []time.Duration{4 * time.Second, 4 * time.Second}
+	if len(rec.sleeps) != len(want) || rec.sleeps[0] != want[0] || rec.sleeps[1] != want[1] {
+		t.Errorf("sleeps = %v, want %v — the third 4s wait would cross 10s", rec.sleeps, want)
+	}
+	if rec.hits() != 3 {
+		t.Errorf("hits = %d, want 3", rec.hits())
+	}
+}
+
+// A wait that would outlast the caller's deadline is not slept: the call
+// returns the rate-limit error it has, not a bare "context deadline exceeded".
+func TestRetryWaitPastTheDeadlineReturnsTheErrorInHand(t *testing.T) {
+	rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		meteredHeaders(w)
+		writeJSON(w, 429, `{"error":"rate_limited","message":"slow down","docs_url":"d","retry_after":30,"limit":300,"group":"current"}`)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := rec.client.StatsCurrent(ctx, StatsParams{GeoID: "es"})
+	var rate *RateLimitError
+	if !errors.As(err, &rate) {
+		t.Fatalf("err = %v, want *RateLimitError", err)
+	}
+	if rec.hits() != 1 || len(rec.sleeps) != 0 {
+		t.Errorf("hits = %d, sleeps = %v — a 30s wait past a 5s deadline must not be slept", rec.hits(), rec.sleeps)
+	}
+}
+
+// WithRetryBudget returns a copy. The client the factory built for the CLI
+// keeps its two-minute patience.
+func TestWithRetryBudgetLeavesTheOriginalAlone(t *testing.T) {
+	var calls int
+	rec := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "30")
+			meteredHeaders(w)
+			writeJSON(w, 429, `{"error":"rate_limited","message":"slow down","docs_url":"d","retry_after":30,"limit":300,"group":"current"}`)
+			return
+		}
+		meteredHeaders(w)
+		writeJSON(w, 200, `{"currency":"USD","stats":[]}`)
+	})
+
+	_ = rec.client.WithRetryBudget(time.Second)
+	if _, err := rec.client.StatsCurrent(context.Background(), StatsParams{GeoID: "es"}); err != nil {
+		t.Fatalf("the original client must still wait out a 30s Retry-After: %v", err)
+	}
+	if len(rec.sleeps) != 1 || rec.sleeps[0] != 30*time.Second {
+		t.Errorf("sleeps = %v, want [30s]", rec.sleeps)
+	}
+}
+
 // A Retry-After longer than the cap is refused rather than slept through: a
 // CLI blocked for an hour on a header looks hung.
 func TestAnOverLongRetryAfterIsNotSleptThrough(t *testing.T) {

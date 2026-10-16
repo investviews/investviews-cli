@@ -100,11 +100,22 @@ func (m Meta) Cost() string {
 	if !m.Metered() {
 		return fmt.Sprintf("cost: free (group %s, uncounted)", m.QuotaGroup)
 	}
-	if m.QuotaUsed != nil {
-		return fmt.Sprintf("cost: 1 metered request (group %s, %d of %s used this cycle)",
-			m.QuotaGroup, *m.QuotaUsed, m.QuotaLimit)
+	return "cost: 1 metered request " + m.QuotaDetail()
+}
+
+// QuotaDetail is the quota part of a metered cost line — "(group current, 12
+// of 100 used this cycle)", or "(group current, limit 100)" when the server
+// sent no used count — and "" for a call that was not metered. A caller that
+// counts several calls (the MCP compare_places tool) builds its own line
+// around it, so the quota wording has one source.
+func (m Meta) QuotaDetail() string {
+	if !m.Metered() {
+		return ""
 	}
-	return fmt.Sprintf("cost: 1 metered request (group %s, limit %s)", m.QuotaGroup, m.QuotaLimit)
+	if m.QuotaUsed != nil {
+		return fmt.Sprintf("(group %s, %d of %s used this cycle)", m.QuotaGroup, *m.QuotaUsed, m.QuotaLimit)
+	}
+	return fmt.Sprintf("(group %s, limit %s)", m.QuotaGroup, m.QuotaLimit)
 }
 
 // Options configures a Client. The zero value is not usable: BaseURL is
@@ -138,6 +149,7 @@ type Client struct {
 	maxRetries  int
 	backoffBase time.Duration
 	maxBackoff  time.Duration
+	retryBudget time.Duration
 	sleep       func(ctx context.Context, d time.Duration) error
 	jitter      func(time.Duration) time.Duration
 }
@@ -194,6 +206,25 @@ func New(opts Options) (*Client, error) {
 	return c, nil
 }
 
+// WithRetryBudget returns a copy of c whose calls give up instead of sleeping
+// once the waits between retries would add up to more than budget. c itself is
+// not changed. A budget of zero or less removes the cap.
+//
+// ⚠️ IT EXISTS FOR CALLERS THAT ARE NOT A TERMINAL. The CLI honours a 429's
+// Retry-After for up to MaxRetryAfter (two minutes), which is right for a
+// person who ran one command and can see it waiting. An agent's tool call is
+// different: two minutes of silence reads as a hung tool, and the agent cannot
+// tell "waiting on a burst limit" from "broken". The MCP server sets a short
+// budget, so a 429 comes back fast as an error the agent can read and act on.
+//
+// A wait that would cross the budget is not shortened — the call returns the
+// error it has. Shortening a server-sent Retry-After only buys a second 429.
+func (c *Client) WithRetryBudget(budget time.Duration) *Client {
+	cp := *c
+	cp.retryBudget = budget
+	return &cp
+}
+
 // BaseURL is the base this client talks to.
 func (c *Client) BaseURL() string { return c.baseURL.String() }
 
@@ -235,6 +266,7 @@ func (c *Client) getRaw(ctx context.Context, req request) ([]byte, Meta, error) 
 		return nil, Meta{}, err
 	}
 
+	var slept time.Duration
 	for attempt := 0; ; attempt++ {
 		body, meta, err := c.attempt(ctx, endpoint, req, attempt+1)
 		if err == nil {
@@ -250,9 +282,20 @@ func (c *Client) getRaw(ctx context.Context, req request) ([]byte, Meta, error) 
 		if !ok {
 			return nil, meta, err
 		}
+		if c.retryBudget > 0 && slept+wait > c.retryBudget {
+			return nil, meta, err
+		}
+		// A wait that would outlast the caller's deadline ends the same
+		// way: the error in hand says what went wrong ("rate limited,
+		// retry after 20s"); sleeping into the deadline would replace it
+		// with a bare "context deadline exceeded".
+		if deadline, has := ctx.Deadline(); has && time.Until(deadline) < wait {
+			return nil, meta, err
+		}
 		if err := c.sleep(ctx, wait); err != nil {
 			return nil, meta, err
 		}
+		slept += wait
 	}
 }
 

@@ -35,6 +35,22 @@ investviews auth login --token iv_live_xxxxxxxx
 configured with `investviews auth status` — it never prints a full token. If the user has no token,
 say so and stop; nothing but `investviews version` works without one.
 
+### When the MCP tools are present, use them
+
+This plugin also starts `investviews mcp`, which serves the same calls as tools: `find_place`,
+`browse_places`, `place_at_point`, `coverage`, `filters`, `usage` (free) and `market_stats`,
+`price_history`, `compare_places` (metered). When you have those tools, call them instead of
+shelling out to the CLI. Every rule below still applies — free before paid, one metered call per
+question, cite the period and the place. A metered answer ends with the same `cost:` line; a free
+one has none.
+
+The server is the same `investviews` binary, so it must be installed first (`brew install`, above)
+and it uses the token from `investviews auth login`. If the tools are missing, either the binary is
+not on the `PATH`, or it is too old to have the `mcp` command (v0.2.1 and older do not —
+`investviews version` says which one is installed, and `investviews mcp --help` answers
+`unknown command` on an old one). Tell the user to upgrade the binary, and use the CLI commands below
+meanwhile.
+
 ## 1. Free, then metered — read the `cost:` line
 
 | command | cost |

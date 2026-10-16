@@ -75,6 +75,13 @@ const (
 	HexesMaxLimit     = 500
 )
 
+// LookupMinRes and LookupMaxRes bound the H3 resolution /geo/lookup takes for
+// a coordinate.
+const (
+	LookupMinRes = 4
+	LookupMaxRes = 8
+)
+
 // GeoPaging describes /geo.
 func GeoPaging() Paging {
 	return Paging{

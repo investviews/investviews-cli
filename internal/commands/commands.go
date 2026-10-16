@@ -31,8 +31,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -77,6 +75,7 @@ func All(deps Deps) []*cobra.Command {
 		NewStatsCmd(deps),
 		NewUsageCmd(deps),
 		NewCoverageCmd(deps),
+		NewMCPCmd(deps),
 	}
 }
 
@@ -205,17 +204,19 @@ func table(w io.Writer, write func(io.Writer)) {
 // older than 2026-09-20 (see api.DataThisPeriod). The words are the same for
 // both, so the skill's table does not depend on which server answered — only
 // the old API names the period, and then the line names it too.
+//
+// The DECISION is api.PlaceAvailability, shared with the MCP server; only the
+// words are the CLI's own, because they name CLI commands.
 func availability(pricesAvailable bool, hasData *bool, period api.NullableDate) string {
-	if !pricesAvailable {
+	switch api.PlaceAvailability(pricesAvailable, hasData, period) {
+	case api.SignalDead:
 		return "no prices — dead end, do not spend a metered call"
-	}
-	switch api.DataThisPeriod(hasData, period) {
-	case api.DataYes:
+	case api.SignalAsk:
 		if hasData == nil {
 			return "prices, current period " + period.Value() + " — ask stats current"
 		}
 		return "prices, data in the current period — ask stats current"
-	case api.DataNo:
+	case api.SignalThin:
 		return "prices, but nothing in the current period — try stats history, not a dead end"
 	default:
 		// Neither key was sent. This endpoint does not publish the signal,
@@ -266,34 +267,9 @@ func ancestry(a api.Ancestors) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// values
+// values — Dash, DashPtr, Num, Count, YesNo and Resolutions live in
+// internal/api/format.go, shared with internal/mcpserver.
 // ─────────────────────────────────────────────────────────────────────────────
-
-// num renders an optional figure. ⚠️ A missing figure is an em dash, never a
-// zero: the aggregate held nothing for that field, which is not the number 0.
-func num(v *float64) string {
-	if v == nil {
-		return "—"
-	}
-	rounded := math.Round(*v*100) / 100
-	return strconv.FormatFloat(rounded, 'f', -1, 64)
-}
-
-func str(v *string) string {
-	if v == nil || *v == "" {
-		return "—"
-	}
-	return *v
-}
-
-// dash renders an empty string as an em dash, so a blank column is visibly
-// blank rather than looking like a layout bug.
-func dash(v string) string {
-	if strings.TrimSpace(v) == "" {
-		return "—"
-	}
-	return v
-}
 
 // splitList expands a repeatable flag that also accepts comma-joined values,
 // so --h3 a --h3 b,c and --h3 a,b,c are the same request.

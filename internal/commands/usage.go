@@ -3,18 +3,11 @@ package commands
 import (
 	"fmt"
 	"io"
-	"sort"
 
 	"github.com/spf13/cobra"
 
 	"github.com/investviews/investviews-cli/internal/api"
 )
-
-// groupOrder is the order the groups are printed in: the two that cost money
-// first, then the two that do not. Reading a map in Go is unordered, and a
-// table whose rows moved between runs would be unreadable to a person and
-// unquotable by an agent.
-var groupOrder = map[string]int{"current": 0, "history": 1, "reports": 2, "metadata": 3}
 
 // NewUsageCmd builds "investviews usage".
 func NewUsageCmd(deps Deps) *cobra.Command {
@@ -59,28 +52,13 @@ func renderUsage(w io.Writer, resp *api.UsageResponse) {
 	if token.ReadOnly {
 		access = "read-only"
 	}
-	fmt.Fprintf(w, "Token %q (%s) — %s, %s\n", token.Name, dash(token.MaskedToken), dash(token.Status), access)
+	fmt.Fprintf(w, "Token %q (%s) — %s, %s\n", token.Name, api.Dash(token.MaskedToken), api.Dash(token.Status), access)
 	if token.LastUsedAt != nil {
 		fmt.Fprintf(w, "last used %s\n", *token.LastUsedAt)
 	}
 	fmt.Fprintln(w)
 
-	names := make([]string, 0, len(resp.Groups))
-	for name := range resp.Groups {
-		names = append(names, name)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		oi, iKnown := groupOrder[names[i]]
-		oj, jKnown := groupOrder[names[j]]
-		switch {
-		case iKnown && jKnown:
-			return oi < oj
-		case iKnown != jKnown:
-			return iKnown
-		default:
-			return names[i] < names[j]
-		}
-	})
+	names := resp.SortedGroupNames()
 
 	var degraded bool
 	table(w, func(tw io.Writer) {
@@ -93,8 +71,8 @@ func renderUsage(w io.Writer, resp *api.UsageResponse) {
 				cost = "METERED"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-				name, cost, count(g.Used), count(g.Limit), count(g.Remaining),
-				str(g.ResetsAt), g.RatePerMin, dash(g.Source))
+				name, cost, api.Count(g.Used), api.Count(g.Limit), api.Count(g.Remaining),
+				api.DashPtr(g.ResetsAt), g.RatePerMin, api.Dash(g.Source))
 		}
 	})
 
@@ -106,14 +84,4 @@ func renderUsage(w io.Writer, resp *api.UsageResponse) {
 		fmt.Fprintln(w, "⚠️ degraded: the metering store was unreachable, so these figures are the")
 		fmt.Fprintln(w, "committed balance alone and may lag the truth. Requests are still being served.")
 	}
-}
-
-// count renders an optional counter. ⚠️ nil means the group is uncounted, so
-// it must never render as 0 — "0 remaining" reads as "spent", which is the
-// opposite of what an uncounted group means.
-func count(v *int64) string {
-	if v == nil {
-		return "—"
-	}
-	return fmt.Sprintf("%d", *v)
 }

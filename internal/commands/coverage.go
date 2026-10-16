@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -78,8 +77,8 @@ func renderCoverage(w io.Writer, country string, resp *api.CoverageResponse) {
 		fmt.Fprintln(tw, "COUNTRY\tPRICES\tSEARCHABLE\tREPORTS\tRESOLUTIONS\tLAST AD PARSED")
 		for _, row := range resp.Countries {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				row.Country, yesNo(row.PricesAvailable), yesNo(row.Searchable), yesNo(row.ReportsAvailable),
-				resolutions(row.H3Resolutions), str(row.LastAdParsedAt))
+				row.Country, api.YesNo(row.PricesAvailable), api.YesNo(row.Searchable), api.YesNo(row.ReportsAvailable),
+				api.Resolutions(row.H3Resolutions), api.DashPtr(row.LastAdParsedAt))
 		}
 	})
 
@@ -87,22 +86,4 @@ func renderCoverage(w io.Writer, country string, resp *api.CoverageResponse) {
 	fmt.Fprintln(w, "A code in the COUNTRY column is a valid --geo-id for stats: `investviews stats")
 	fmt.Fprintln(w, "current --geo-id es` answers for the whole market in one metered call.")
 	fmt.Fprintln(w, "A blank LAST AD PARSED means no source targets that market directly — not empty.")
-}
-
-func yesNo(v bool) string {
-	if v {
-		return "yes"
-	}
-	return "no"
-}
-
-func resolutions(values []int) string {
-	if len(values) == 0 {
-		return "—"
-	}
-	parts := make([]string, 0, len(values))
-	for _, v := range values {
-		parts = append(parts, strconv.Itoa(v))
-	}
-	return strings.Join(parts, ",")
 }
