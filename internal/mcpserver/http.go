@@ -45,7 +45,7 @@ import (
 //
 //  2. ⚠️ ONE SHARED SERVER, ONE CLIENT PER CALL. The mcp.Server is built once.
 //     Each tool call reads the token from req.Extra.TokenInfo and builds its
-//     API client from it (server.clientForRequest). There is no default token
+//     API client from it (bearerClient). There is no default token
 //     on a hosted server, so a call can never be sent with someone else's.
 //
 //  3. ⚠️ TOKENS ARE NEVER LOGGED. Not in the verifier, not in an error text,
@@ -57,6 +57,14 @@ import (
 //     "your sign-in is gone" and sends its user back through the OAuth flow.
 //     When the token check cannot reach a verdict (5xx, 429, network error),
 //     the answer is 503 with Retry-After, and nothing is cached.
+//
+// ⚠️ THE RESOURCE BINDING IS ENFORCED WHEN THE TOKEN IS ISSUED, NOT HERE. The
+// authorization server only hands out a token for this resource. This server
+// cannot tell such a token from any other: the check below asks the API
+// whether the token is valid, and the API does not say which resource it was
+// issued for. So any valid InvestViews API token works at /mcp, including
+// one the user created by hand. The tools are read-only, so a token that
+// works here can do nothing it could not do against the API directly.
 
 const (
 	// MCPPath is where the protocol is served.
@@ -86,11 +94,20 @@ const (
 	// slow answer is an outage (503), not a reason to hold the agent.
 	verifyTimeout = 10 * time.Second
 
+	// tokenPrefix, minTokenLen and maxTokenLen describe a plausible API
+	// token, for the pre-filter in plausibleToken. Today's tokens are
+	// iv_live_ro_ or iv_live_rw_ and 32 URL-safe characters (43 in all). The
+	// bounds are loose on purpose: a change in the token format must not
+	// lock every user out of the hosted server; the API stays the judge.
+	tokenPrefix = "iv_live_"
+	minTokenLen = 24
+	maxTokenLen = 128
+
 	// outageRetryAfter is the Retry-After, in seconds, sent with a 503.
 	outageRetryAfter = "5"
 
 	// tokenExtraKey is where the verifier puts the plaintext token in
-	// TokenInfo.Extra, for clientForRequest to read. TokenInfo lives only
+	// TokenInfo.Extra, for bearerClient to read. TokenInfo lives only
 	// for the request; nothing in this package or the SDK logs it.
 	tokenExtraKey = "investviews_token"
 )
@@ -101,7 +118,7 @@ var (
 	errAPIUnavailable = errors.New("the InvestViews API is not reachable right now; retry in a few seconds")
 
 	// errNoBearerToken is a hosted tool call that arrived with no token
-	// info — a wiring fault, see clientForRequest.
+	// info — a wiring fault, see bearerClient.
 	errNoBearerToken = errors.New("internal: this request carries no bearer token")
 )
 
@@ -130,14 +147,14 @@ type HTTPOptions struct {
 
 	// NewClient builds the API client for one token. Nil uses api.New with
 	// APIURL — tests replace it, nothing else should.
-	NewClient TokenClientFactory
+	NewClient func(token string) (*api.Client, error)
 
 	// CacheTTL overrides TokenCacheTTL; zero keeps it. An end-to-end test
 	// shortens it to watch a revoked token stop working.
 	CacheTTL time.Duration
 
-	// HTTPClient sends the token checks. Nil uses a client with a 10 s
-	// timeout.
+	// HTTPClient sends the token checks. Nil uses http.DefaultClient. Each
+	// check is bounded by verifyTimeout either way.
 	HTTPClient *http.Client
 
 	// now is the clock for the token cache. Tests set it.
@@ -184,7 +201,7 @@ func NewHTTPHandler(opts HTTPOptions) (http.Handler, error) {
 		}
 	}
 
-	srv := build(&server{tokenClient: newClient}, opts.Version, logger)
+	srv := build(&server{clientFor: bearerClient(newClient)}, opts.Version, logger)
 
 	// ⚠️ DisableLocalhostProtection: the SDK refuses, with 403, any request
 	// that reaches a loopback listener with a non-loopback Host. That is
@@ -197,15 +214,22 @@ func NewHTTPHandler(opts HTTPOptions) (http.Handler, error) {
 		&mcp.StreamableHTTPOptions{
 			Stateless:                  true,
 			DisableLocalhostProtection: true,
-			Logger:                     logger,
+			// A tool call is a few hundred bytes of JSON. The SDK's 4 MiB
+			// default is far more than any honest request needs.
+			MaxRequestBodyBytes: 1 << 20,
+			Logger:              logger,
 		},
 	)
 
 	resource := publicURL + MCPPath
 	metadataURL := publicURL + ProtectedResourcePath
 	v := newVerifier(apiURL, ttl, opts.HTTPClient, logger, now)
+	// ⚠️ AllowMissingExpiration: API tokens do not expire, so TokenInfo has
+	// no Expiration, and RequireBearerToken refuses that by default ("token
+	// missing expiration", 401). How long a verdict holds is the cache's job.
 	protected := auth.RequireBearerToken(v.verify, &auth.RequireBearerTokenOptions{
-		ResourceMetadataURL: metadataURL,
+		ResourceMetadataURL:    metadataURL,
+		AllowMissingExpiration: true,
 	})(mcpHandler)
 
 	metadata := auth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
@@ -255,6 +279,44 @@ func tokenFromInfo(info *auth.TokenInfo) string {
 	return token
 }
 
+// bearerClient is the hosted server's clientFor: the API client for the
+// bearer token the request was authorized with.
+//
+// ⚠️ IT NEVER FALLS BACK TO ANOTHER TOKEN. A call that arrives without token
+// info is refused, not answered with some default credential: on a shared
+// server, a fallback token is one user's quota spent on another user's
+// question. RequireBearerToken sits in front of every /mcp request, so this
+// error means a wiring fault, not a user mistake.
+func bearerClient(newClient func(token string) (*api.Client, error)) func(*mcp.CallToolRequest) (*api.Client, error) {
+	return func(req *mcp.CallToolRequest) (*api.Client, error) {
+		var info *auth.TokenInfo
+		if req != nil && req.Extra != nil {
+			info = req.Extra.TokenInfo
+		}
+		token := tokenFromInfo(info)
+		if token == "" {
+			return nil, errNoBearerToken
+		}
+		return newClient(token)
+	}
+}
+
+// plausibleToken is a cheap pre-filter: false for a string that cannot be an
+// InvestViews API token, so garbage is refused (401) without costing the API
+// a request. It checks the prefix, the length and the URL-safe alphabet only.
+func plausibleToken(token string) bool {
+	if len(token) < minTokenLen || len(token) > maxTokenLen || !strings.HasPrefix(token, tokenPrefix) {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		c := token[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // ── the verifier ─────────────────────────────────────────────────────────────
 
 // verifier checks a bearer token with one free API call (GET /usage) and
@@ -275,20 +337,19 @@ func tokenFromInfo(info *auth.TokenInfo) string {
 type verifier struct {
 	usageURL string
 	http     *http.Client
+	timeout  time.Duration
 	logger   *slog.Logger
 	cache    *tokenCache
 }
 
 func newVerifier(apiURL string, ttl time.Duration, httpClient *http.Client, logger *slog.Logger, now func() time.Time) *verifier {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: verifyTimeout}
-	}
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+		httpClient = http.DefaultClient
 	}
 	return &verifier{
 		usageURL: strings.TrimRight(apiURL, "/") + string(api.EndpointUsage),
 		http:     httpClient,
+		timeout:  verifyTimeout,
 		logger:   logger,
 		cache:    newTokenCache(ttl, now),
 	}
@@ -298,12 +359,16 @@ func newVerifier(apiURL string, ttl time.Duration, httpClient *http.Client, logg
 // error or a log line: RequireBearerToken writes the error text into the
 // response body, and the logger writes to the service's journal.
 func (v *verifier) verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+	if !plausibleToken(token) {
+		v.logger.Debug("token check: malformed token refused without an API call")
+		return nil, auth.ErrInvalidToken
+	}
 	key := sha256.Sum256([]byte(token))
-	if valid, until, ok := v.cache.get(key); ok {
+	if valid, ok := v.cache.get(key); ok {
 		if !valid {
 			return nil, auth.ErrInvalidToken
 		}
-		return tokenInfo(token, until), nil
+		return tokenInfo(token), nil
 	}
 
 	status, err := v.check(ctx, token)
@@ -315,7 +380,8 @@ func (v *verifier) verify(ctx context.Context, token string, _ *http.Request) (*
 		markOutage(ctx)
 		return nil, errAPIUnavailable
 	case status == http.StatusOK, status == http.StatusPaymentRequired:
-		return tokenInfo(token, v.cache.put(key, true)), nil
+		v.cache.put(key, true)
+		return tokenInfo(token), nil
 	case status == http.StatusUnauthorized:
 		v.cache.put(key, false)
 		v.logger.Debug("token check: token refused by the API")
@@ -330,7 +396,7 @@ func (v *verifier) verify(ctx context.Context, token string, _ *http.Request) (*
 // check sends GET /usage with token and returns the status. The body is
 // drained and dropped: only the status is a verdict.
 func (v *verifier) check(ctx context.Context, token string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, v.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.usageURL, nil)
 	if err != nil {
@@ -349,17 +415,10 @@ func (v *verifier) check(ctx context.Context, token string) (int, error) {
 }
 
 // tokenInfo is what RequireBearerToken puts on the request, and what a tool
-// call finds in req.Extra.TokenInfo.
-//
-// ⚠️ Expiration IS REQUIRED. go-sdk's RequireBearerToken refuses a TokenInfo
-// with a zero Expiration ("token missing expiration", 401). API tokens do not
-// expire, so it is set to the end of this verdict's cache entry — the moment
-// the token is checked again anyway.
-func tokenInfo(token string, until time.Time) *auth.TokenInfo {
-	return &auth.TokenInfo{
-		Expiration: until,
-		Extra:      map[string]any{tokenExtraKey: token},
-	}
+// call finds in req.Extra.TokenInfo. It has no Expiration: API tokens do not
+// expire (see AllowMissingExpiration in NewHTTPHandler).
+func tokenInfo(token string) *auth.TokenInfo {
+	return &auth.TokenInfo{Extra: map[string]any{tokenExtraKey: token}}
 }
 
 // tokenCache holds token verdicts for ttl, keyed by the token's SHA-256.
@@ -387,22 +446,22 @@ func newTokenCache(ttl time.Duration, now func() time.Time) *tokenCache {
 	return &tokenCache{ttl: ttl, now: now, entries: map[[sha256.Size]byte]cacheEntry{}}
 }
 
-func (c *tokenCache) get(key [sha256.Size]byte) (valid bool, until time.Time, ok bool) {
+func (c *tokenCache) get(key [sha256.Size]byte) (valid, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok {
-		return false, time.Time{}, false
+		return false, false
 	}
 	if !c.now().Before(e.until) {
 		delete(c.entries, key)
-		return false, time.Time{}, false
+		return false, false
 	}
-	return e.valid, e.until, true
+	return e.valid, true
 }
 
-// put stores a verdict and returns when it expires.
-func (c *tokenCache) put(key [sha256.Size]byte, valid bool) time.Time {
+// put stores a verdict for ttl.
+func (c *tokenCache) put(key [sha256.Size]byte, valid bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
@@ -413,9 +472,7 @@ func (c *tokenCache) put(key [sha256.Size]byte, valid bool) time.Time {
 			}
 		}
 	}
-	until := now.Add(c.ttl)
-	c.entries[key] = cacheEntry{valid: valid, until: until}
-	return until
+	c.entries[key] = cacheEntry{valid: valid, until: now.Add(c.ttl)}
 }
 
 // ── 503 on an outage ─────────────────────────────────────────────────────────

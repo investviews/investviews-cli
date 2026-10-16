@@ -368,7 +368,7 @@ func hostedRoot(t *testing.T, apiURL string, stdout, stderr io.Writer, args ...s
 			t.Error("the hosted mode used the stdio client factory")
 			return nil, ErrNoToken
 		},
-		APIURL: func() (string, error) { return apiURL, nil },
+		APIURL: func() string { return apiURL },
 	}
 	for _, sub := range All(deps) {
 		root.AddCommand(sub)
@@ -518,6 +518,9 @@ func startHosted(t *testing.T, root *cobra.Command, stderr *lockedBuffer) string
 
 // The hidden --token-cache-ttl flag exists for end-to-end tests that revoke a
 // token and wait for the server to notice. It must reach the token cache.
+//
+// The TTL is a whole second, not a few milliseconds: the two quick requests
+// must land inside it even on a slow machine under -race.
 func TestMCPHTTPTokenCacheTTLFlagShortensTheCache(t *testing.T) {
 	var checks atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -531,12 +534,12 @@ func TestMCPHTTPTokenCacheTTLFlagShortensTheCache(t *testing.T) {
 
 	var stdout, stderr lockedBuffer
 	root := hostedRoot(t, api.URL+"/public/v1", &stdout, &stderr,
-		"mcp", "--http", "127.0.0.1:0", "--token-cache-ttl", "50ms")
+		"mcp", "--http", "127.0.0.1:0", "--token-cache-ttl", "1s")
 	base := startHosted(t, root, &stderr)
 
 	post := func() {
 		req, _ := http.NewRequest(http.MethodPost, base+"/mcp", strings.NewReader(initializeFrame))
-		req.Header.Set("Authorization", "Bearer iv_live_ro_test")
+		req.Header.Set("Authorization", "Bearer iv_live_ro_"+strings.Repeat("t", 32))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		resp, err := http.DefaultClient.Do(req)
@@ -555,7 +558,7 @@ func TestMCPHTTPTokenCacheTTLFlagShortensTheCache(t *testing.T) {
 	if got := checks.Load(); got != 1 {
 		t.Fatalf("token checks after two quick requests = %d, want 1 (cached)", got)
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
 	post()
 	if got := checks.Load(); got != 2 {
 		t.Errorf("token checks after the TTL passed = %d, want 2", got)

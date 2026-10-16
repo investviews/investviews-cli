@@ -78,8 +78,8 @@ https://mcp.investviews.ai/mcp runs; you do not need it on your computer:
   investviews mcp --http 127.0.0.1:8090 --public-url https://mcp.investviews.ai --auth-server https://api.investviews.ai
 
 Every request must carry its own bearer token, and every API call is sent with
-that token. The saved token and INVESTVIEWS_TOKEN are never used in this mode.
-INVESTVIEWS_API_URL still picks the API.`,
+that token. The saved token and INVESTVIEWS_TOKEN are never used in this mode,
+and the config file is not read: INVESTVIEWS_API_URL alone picks the API.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 	}
@@ -158,10 +158,7 @@ func serveHTTP(cmd *cobra.Command, deps Deps, flags hostedFlags) error {
 	if flags.tokenCacheTTL < 0 {
 		return fmt.Errorf("--token-cache-ttl must not be negative, got %s", flags.tokenCacheTTL)
 	}
-	apiURL, err := deps.apiURL()
-	if err != nil {
-		return err
-	}
+	apiURL := deps.APIURL()
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	handler, err := mcpserver.NewHTTPHandler(mcpserver.HTTPOptions{
 		PublicURL:  flags.publicURL,
@@ -182,6 +179,10 @@ func serveHTTP(cmd *cobra.Command, deps Deps, flags hostedFlags) error {
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout covers reading the request only; net/http clears the
+		// read deadline once the body is read, so a streamed answer is not
+		// cut by it.
+		ReadTimeout: 30 * time.Second,
 		// No WriteTimeout: a streamed answer may legitimately take up to
 		// ToolTimeout, and each tool call has its own deadline already.
 		IdleTimeout: 2 * time.Minute,

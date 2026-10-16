@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/investviews/investviews-cli/internal/api"
@@ -36,39 +35,11 @@ const retryBudget = 10 * time.Second
 // one shared server sends every call with the token of the request that made
 // it. req may be nil only on stdio (and in tests that call a helper directly).
 func (s *server) client(req *mcp.CallToolRequest) (*api.Client, error) {
-	var (
-		c   *api.Client
-		err error
-	)
-	if s.tokenClient != nil {
-		c, err = s.clientForRequest(req)
-	} else {
-		c, err = s.newClient()
-	}
+	c, err := s.clientFor(req)
 	if err != nil {
 		return nil, err
 	}
 	return c.WithRetryBudget(retryBudget), nil
-}
-
-// clientForRequest is the hosted-mode half of client: the API client for the
-// bearer token this request was authorized with.
-//
-// ⚠️ IT NEVER FALLS BACK TO ANOTHER TOKEN. A call that arrives without token
-// info is refused, not answered with some default credential: on a shared
-// server, a fallback token is one user's quota spent on another user's
-// question. RequireBearerToken sits in front of every /mcp request, so this
-// error means a wiring fault, not a user mistake.
-func (s *server) clientForRequest(req *mcp.CallToolRequest) (*api.Client, error) {
-	var info *auth.TokenInfo
-	if req != nil && req.Extra != nil {
-		info = req.Extra.TokenInfo
-	}
-	token := tokenFromInfo(info)
-	if token == "" {
-		return nil, errNoBearerToken
-	}
-	return s.tokenClient(token)
 }
 
 // ok is a successful tool result: payload as structuredContent, text as the

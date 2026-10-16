@@ -48,14 +48,7 @@ type Deps struct {
 	// APIURL resolves the API base URL alone, with no token. Only the hosted
 	// MCP mode (`investviews mcp --http`) reads it: there every request
 	// brings its own token, and the operator's saved one must never be used.
-	APIURL func() (string, error)
-}
-
-func (d Deps) apiURL() (string, error) {
-	if d.APIURL == nil {
-		return "", errors.New("internal: no API URL resolver was configured")
-	}
-	return d.APIURL()
+	APIURL func() string
 }
 
 func (d Deps) client() (*api.Client, error) {

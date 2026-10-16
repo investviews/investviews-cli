@@ -27,7 +27,7 @@ type probeFunc func(ctx context.Context, s *server) (*mcp.CallToolResult, any, e
 func callProbe(t *testing.T, factory ClientFactory, fn probeFunc) *mcp.CallToolResult {
 	t.Helper()
 
-	s := &server{newClient: factory}
+	s := &server{clientFor: func(*mcp.CallToolRequest) (*api.Client, error) { return factory() }}
 	srv := mcp.NewServer(&mcp.Implementation{Name: Name, Version: testVersion}, nil)
 	mcp.AddTool(srv, &mcp.Tool{Name: "probe", Description: "test probe"},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {

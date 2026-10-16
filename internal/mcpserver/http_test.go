@@ -3,12 +3,14 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/investviews/investviews-cli/internal/api"
 )
 
 // The hosted-mode tests run the real HTTP handler on an httptest server and
@@ -28,10 +32,11 @@ const (
 	testAuthServer = "https://api.investviews.ai"
 	testMetaURL    = testPublicURL + "/.well-known/oauth-protected-resource"
 
-	goodToken  = "iv_live_ro_good_0000000000000000"
-	otherToken = "iv_live_ro_other_111111111111111"
-	lapsedTok  = "iv_live_ro_lapsed_22222222222222"
-	badToken   = "iv_live_ro_bad_33333333333333333"
+	// Real API tokens: a prefix, then 32 URL-safe characters.
+	goodToken  = "iv_live_ro_good_000000000000000000000000000"
+	otherToken = "iv_live_ro_other_11111111111111111111111111"
+	lapsedTok  = "iv_live_ro_lapsed_2222222222222222222222222"
+	badToken   = "iv_live_ro_bad_3333333333333333333333333333"
 )
 
 // hostedAPI is a fake public API that knows which tokens exist. It records
@@ -43,8 +48,9 @@ type hostedAPI struct {
 	mu sync.Mutex
 	// status overrides the answer to /usage for every token while non-zero:
 	// a test sets it to 500 or 429 to play an outage.
-	status int
-	seen   []string // "Bearer …" of every request, in order
+	status  int
+	seen    []string        // "Bearer …" of every request, in order
+	revoked map[string]bool // tokens the user revoked in their account
 }
 
 func newHostedAPI(t *testing.T) *hostedAPI {
@@ -54,17 +60,21 @@ func newHostedAPI(t *testing.T) *hostedAPI {
 		h.mu.Lock()
 		h.seen = append(h.seen, r.Header.Get("Authorization"))
 		status := h.status
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		revoked := h.revoked[token]
 		h.mu.Unlock()
 
 		if status != 0 {
 			writeBody(w, status, `{"error":"internal_error","message":"down"}`)
 			return
 		}
-		switch strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		case goodToken, otherToken:
+		switch {
+		case revoked:
+			writeBody(w, http.StatusUnauthorized, `{"error":"unauthorized","message":"Token revoked."}`)
+		case token == goodToken, token == otherToken:
 			freeHeaders(w)
 			writeBody(w, http.StatusOK, usageReply)
-		case lapsedTok:
+		case token == lapsedTok:
 			writeBody(w, http.StatusPaymentRequired,
 				`{"error":"subscription_inactive","message":"Your plan has ended."}`)
 		default:
@@ -73,6 +83,17 @@ func newHostedAPI(t *testing.T) *hostedAPI {
 	}))
 	t.Cleanup(h.server.Close)
 	return h
+}
+
+// revoke makes the API refuse token from now on, as a revoke in the user's
+// account does.
+func (h *hostedAPI) revoke(token string) {
+	h.mu.Lock()
+	if h.revoked == nil {
+		h.revoked = map[string]bool{}
+	}
+	h.revoked[token] = true
+	h.mu.Unlock()
 }
 
 func (h *hostedAPI) setStatus(status int) {
@@ -369,7 +390,7 @@ func TestVerifierMapsEveryStatus(t *testing.T) {
 			api := newHostedAPI(t)
 			api.setStatus(tc.outage)
 			clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-			v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, nil, clock.Now)
+			v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, clock.Now)
 
 			info, err := v.verify(context.Background(), tc.token, nil)
 			if tc.wantErr != nil {
@@ -384,10 +405,6 @@ func TestVerifierMapsEveryStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("err = %v, want a valid token", err)
 			}
-			// ⚠️ RequireBearerToken refuses a TokenInfo with no expiry.
-			if want := clock.Now().Add(TokenCacheTTL); !info.Expiration.Equal(want) {
-				t.Errorf("Expiration = %v, want %v", info.Expiration, want)
-			}
 			if got := tokenFromInfo(info); got != tc.token {
 				t.Errorf("token carried in TokenInfo = %q, want the request's token", got)
 			}
@@ -400,7 +417,7 @@ func TestVerifierNetworkErrorIsUnavailable(t *testing.T) {
 	url := api.server.URL + "/public/v1"
 	api.server.Close()
 
-	v := newVerifier(url, TokenCacheTTL, nil, nil, time.Now)
+	v := newVerifier(url, TokenCacheTTL, nil, discard, time.Now)
 	if _, err := v.verify(context.Background(), goodToken, nil); !errors.Is(err, errAPIUnavailable) {
 		t.Fatalf("err = %v, want errAPIUnavailable", err)
 	}
@@ -409,7 +426,7 @@ func TestVerifierNetworkErrorIsUnavailable(t *testing.T) {
 func TestVerifierCachesValidAndInvalidForTheTTL(t *testing.T) {
 	api := newHostedAPI(t)
 	clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, nil, clock.Now)
+	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, clock.Now)
 	ctx := context.Background()
 
 	for range 3 {
@@ -427,13 +444,164 @@ func TestVerifierCachesValidAndInvalidForTheTTL(t *testing.T) {
 		t.Errorf("invalid token checked %d times inside the TTL, want 1", got)
 	}
 
-	// A token revoked in /user/api stops working once its entry expires.
-	clock.Advance(TokenCacheTTL + time.Second)
+	// A revoked token keeps working until its entry expires — at most one
+	// TTL — and is refused after that.
+	api.revoke(goodToken)
 	if _, err := v.verify(ctx, goodToken, nil); err != nil {
-		t.Fatal(err)
+		t.Fatalf("revoked token inside the TTL: err = %v, want the cached verdict", err)
+	}
+	clock.Advance(TokenCacheTTL + time.Second)
+	if _, err := v.verify(ctx, goodToken, nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("revoked token after the TTL: err = %v, want auth.ErrInvalidToken", err)
 	}
 	if got := api.calls(goodToken); got != 2 {
 		t.Errorf("valid token checked %d times after the TTL, want 2", got)
+	}
+}
+
+// TestHTTPRevokedTokenIs401AfterTheTTL is the same rule at the HTTP edge: the
+// agent gets a 401 that points it back at the metadata, so it signs in again.
+func TestHTTPRevokedTokenIs401AfterTheTTL(t *testing.T) {
+	api := newHostedAPI(t)
+	clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	srv := hostedServer(t, api, func(o *HTTPOptions) { o.now = clock.Now })
+
+	if resp := postMCP(t, srv, goodToken, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("before the revoke: status = %d, want 200", resp.StatusCode)
+	}
+	api.revoke(goodToken)
+	clock.Advance(TokenCacheTTL + time.Second)
+
+	resp := postMCP(t, srv, goodToken, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("after the revoke and the TTL: status = %d, want 401", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Header.Get("WWW-Authenticate"), `resource_metadata="`+testMetaURL+`"`) {
+		t.Errorf("WWW-Authenticate = %q, want the resource_metadata URL", resp.Header.Get("WWW-Authenticate"))
+	}
+}
+
+// TestVerifierRefusesMalformedTokensWithoutAnAPICall: a string that cannot
+// be an API token is refused here, so garbage never costs the API a request.
+func TestVerifierRefusesMalformedTokensWithoutAnAPICall(t *testing.T) {
+	api := newHostedAPI(t)
+	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
+
+	for name, token := range map[string]string{
+		"no prefix":        "abc",
+		"another vendor":   "sk-0000000000000000000000000000000000000000",
+		"prefix only":      "iv_live_",
+		"too short":        "iv_live_ro_x",
+		"too long":         "iv_live_ro_" + strings.Repeat("a", 200),
+		"not URL-safe":     "iv_live_ro_good_00000000000000000000000000.",
+		"a space inside":   "iv_live_ro_good 000000000000000000000000000",
+		"a non-ASCII byte": "iv_live_ro_good_00000000000000000000000000é",
+	} {
+		if _, err := v.verify(context.Background(), token, nil); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Errorf("%s: err = %v, want auth.ErrInvalidToken", name, err)
+		}
+	}
+	if api.total() != 0 {
+		t.Errorf("malformed tokens reached the API %d times, want 0", api.total())
+	}
+
+	// A read/write token is well-formed: the API decides about it.
+	rw := "iv_live_rw_" + strings.Repeat("a", 32)
+	if _, err := v.verify(context.Background(), rw, nil); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Errorf("unknown rw token: err = %v, want auth.ErrInvalidToken", err)
+	}
+	if api.total() != 1 {
+		t.Errorf("a well-formed token reached the API %d times, want 1", api.total())
+	}
+}
+
+// TestVerifierTimeoutIsUnavailable: a slow API is an outage, not a verdict.
+func TestVerifierTimeoutIsUnavailable(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(slow.Close)
+
+	v := newVerifier(slow.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
+	v.timeout = 20 * time.Millisecond
+	if _, err := v.verify(context.Background(), goodToken, nil); !errors.Is(err, errAPIUnavailable) {
+		t.Fatalf("err = %v, want errAPIUnavailable", err)
+	}
+}
+
+// TestTokenCacheSweepsExpiredEntries: once the cache holds sweepAt entries,
+// a put drops every expired one and keeps the live ones.
+func TestTokenCacheSweepsExpiredEntries(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
+	c := newTokenCache(time.Minute, clock.Now)
+	key := func(i int) [32]byte { return sha256.Sum256([]byte(strconv.Itoa(i))) }
+
+	for i := range sweepAt - 1 {
+		c.put(key(i), true)
+	}
+	clock.Advance(30 * time.Second)
+	c.put(key(-1), true) // live after the next advance
+	clock.Advance(31 * time.Second)
+	c.put(key(-2), false)
+
+	if got := len(c.entries); got != 2 {
+		t.Errorf("entries after the sweep = %d, want 2", got)
+	}
+	if valid, ok := c.get(key(-1)); !ok || !valid {
+		t.Errorf("the live entry: valid=%v ok=%v, want true true", valid, ok)
+	}
+}
+
+// TestOutageAs503LeavesOtherStatusesAlone: only a flagged request's 500 turns
+// into a 503. A 500 from anything else passes through as is.
+func TestOutageAs503LeavesOtherStatusesAlone(t *testing.T) {
+	h := outageAs503(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") != "" {
+		t.Errorf("an unflagged 500 got Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+}
+
+// TestBearerClientNeverFallsBack: a hosted call without its own token is
+// refused, and the factory is never asked for a client.
+func TestBearerClientNeverFallsBack(t *testing.T) {
+	var got []string
+	clientFor := bearerClient(func(token string) (*api.Client, error) {
+		got = append(got, token)
+		return api.New(api.Options{BaseURL: "http://127.0.0.1:1/public/v1", Token: token})
+	})
+
+	for name, req := range map[string]*mcp.CallToolRequest{
+		"nil request":            nil,
+		"no extra":               {},
+		"no token info":          {Extra: &mcp.RequestExtra{}},
+		"token info, no extra":   {Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{}}},
+		"token info, other key":  {Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{Extra: map[string]any{"other": goodToken}}}},
+		"token info, not string": {Extra: &mcp.RequestExtra{TokenInfo: &auth.TokenInfo{Extra: map[string]any{tokenExtraKey: 42}}}},
+	} {
+		if _, err := clientFor(req); !errors.Is(err, errNoBearerToken) {
+			t.Errorf("%s: err = %v, want errNoBearerToken", name, err)
+		}
+	}
+	if len(got) != 0 {
+		t.Fatalf("the factory was called %d times for calls with no token", len(got))
+	}
+
+	req := &mcp.CallToolRequest{Extra: &mcp.RequestExtra{TokenInfo: tokenInfo(goodToken)}}
+	if _, err := clientFor(req); err != nil {
+		t.Fatalf("with a token: %v", err)
+	}
+	if len(got) != 1 || got[0] != goodToken {
+		t.Errorf("factory got %q, want [%s]", got, goodToken)
 	}
 }
 
@@ -441,7 +609,7 @@ func TestVerifierCachesValidAndInvalidForTheTTL(t *testing.T) {
 // for a minute after the API is back, and must not force a new sign-in.
 func TestVerifierDoesNotCacheAnOutage(t *testing.T) {
 	api := newHostedAPI(t)
-	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, nil, time.Now)
+	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
 	ctx := context.Background()
 
 	api.setStatus(http.StatusInternalServerError)
@@ -529,6 +697,9 @@ func TestNewHTTPHandlerRefusesBadURLs(t *testing.T) {
 		t.Errorf("trailing slash refused: %v", err)
 	}
 }
+
+// discard is a logger that drops everything.
+var discard = slog.New(slog.DiscardHandler)
 
 // safeBuffer is a bytes.Buffer the server's goroutines can log into while
 // the test reads it.

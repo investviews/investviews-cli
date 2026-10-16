@@ -101,7 +101,7 @@ metering, plan checks and revocation work exactly as for the CLI.
 ### Running the hosted server yourself
 
 You do not need this to use InvestViews: the URL above is already running. It is here for anyone who
-runs their own copy.
+runs their own copy. It needs `investviews` v0.4.0 or newer (`investviews mcp --help` lists `--http`).
 
 ```sh
 investviews mcp --http 127.0.0.1:8090 \
@@ -125,7 +125,12 @@ investviews mcp --http 127.0.0.1:8090 \
 
 Put it behind a TLS proxy that does not buffer responses (some answers are streamed as server-sent
 events). It stops cleanly on `SIGTERM` and lets requests in flight finish first. It reads the API
-base from `INVESTVIEWS_API_URL` and, like every command, needs a home directory for its config path.
+base from `INVESTVIEWS_API_URL` only; it never reads the config file, so the service user needs no
+home directory.
+
+The OAuth flow issues tokens for `<public-url>/mcp` only, but the server itself does not check which
+resource a token was issued for: it asks the API whether the token is valid, so any valid InvestViews
+API token works at `/mcp`. The tools are read-only.
 
 ### Local server — `investviews mcp`
 

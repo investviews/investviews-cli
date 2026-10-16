@@ -56,20 +56,14 @@ var instructions string
 // is none; tests point it at an httptest server.
 type ClientFactory func() (*api.Client, error)
 
-// TokenClientFactory builds an API client for one bearer token. The hosted
-// mode (http.go) calls it once per tool call, with the token of the request
-// that made the call.
-type TokenClientFactory func(token string) (*api.Client, error)
-
 // server is the state every tool handler shares. It holds a factory, not a
 // client — see rule 2 in the package comment.
 //
-// Exactly one of the two factories is set: newClient on stdio, where the token
-// comes from the user's config; tokenClient in the hosted mode, where it comes
-// from each request. client() picks by which one is set.
+// clientFor builds the client for one tool call. On stdio (New) it ignores
+// the request and reads the token from the user's config; in the hosted mode
+// (bearerClient in http.go) it takes the token from the request itself.
 type server struct {
-	newClient   ClientFactory
-	tokenClient TokenClientFactory
+	clientFor func(req *mcp.CallToolRequest) (*api.Client, error)
 }
 
 // New builds the MCP server. version is the build stamp
@@ -87,7 +81,9 @@ type server struct {
 // The server is returned unconnected: the caller picks the transport (stdio
 // for `investviews mcp`, in-memory for tests).
 func New(newClient ClientFactory, version string, logger *slog.Logger) *mcp.Server {
-	return build(&server{newClient: newClient}, version, logger)
+	return build(&server{
+		clientFor: func(*mcp.CallToolRequest) (*api.Client, error) { return newClient() },
+	}, version, logger)
 }
 
 // build is New for either kind of server: the stdio one from New, and the
