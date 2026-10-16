@@ -91,10 +91,15 @@ INVESTVIEWS_API_URL still picks the API.`,
 		"with --http: the public origin agents use, with no path; the protected resource is <public-url>/mcp")
 	cmd.Flags().StringVar(&hosted.authServer, "auth-server", mcpserver.DefaultAuthServer,
 		"with --http: the OAuth authorization server named in the protected resource metadata")
+	// Test-only: an end-to-end test revokes a token and waits for the server
+	// to notice, which takes one cache lifetime. Hidden from --help.
+	cmd.Flags().DurationVar(&hosted.tokenCacheTTL, "token-cache-ttl", 0,
+		"with --http: how long one token check is trusted (0 keeps the default)")
+	_ = cmd.Flags().MarkHidden("token-cache-ttl")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		if hosted.addr == "" {
-			for _, name := range []string{"public-url", "auth-server"} {
+			for _, name := range []string{"public-url", "auth-server", "token-cache-ttl"} {
 				if cmd.Flags().Changed(name) {
 					return fmt.Errorf("--%s only applies with --http", name)
 				}
@@ -127,9 +132,10 @@ INVESTVIEWS_API_URL still picks the API.`,
 
 // hostedFlags are the --http mode's flags.
 type hostedFlags struct {
-	addr       string
-	publicURL  string
-	authServer string
+	addr          string
+	publicURL     string
+	authServer    string
+	tokenCacheTTL time.Duration
 }
 
 // shutdownTimeout is how long a stopping hosted server waits for requests in
@@ -149,6 +155,9 @@ const shutdownTimeout = mcpserver.ToolTimeout + 5*time.Second
 // which the service manager keeps as the journal.
 func serveHTTP(cmd *cobra.Command, deps Deps, flags hostedFlags) error {
 	stderr := cmd.ErrOrStderr()
+	if flags.tokenCacheTTL < 0 {
+		return fmt.Errorf("--token-cache-ttl must not be negative, got %s", flags.tokenCacheTTL)
+	}
 	apiURL, err := deps.apiURL()
 	if err != nil {
 		return err
@@ -160,6 +169,7 @@ func serveHTTP(cmd *cobra.Command, deps Deps, flags hostedFlags) error {
 		APIURL:     apiURL,
 		Version:    version.Version,
 		Logger:     logger,
+		CacheTTL:   flags.tokenCacheTTL,
 	})
 	if err != nil {
 		return err
