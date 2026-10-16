@@ -18,7 +18,9 @@
 //     is a long-running process inside an agent. A user who runs `investviews
 //     auth login` while it runs must not have to restart the agent, and a
 //     missing token must come back from the factory as a tool error on the
-//     call that needed it — not as a server that refused to start.
+//     call that needed it — not as a server that refused to start. The hosted
+//     mode (http.go) leans on the same rule: one shared server, and each call
+//     builds its client from the bearer token of the request that made it.
 package mcpserver
 
 import (
@@ -54,10 +56,14 @@ var instructions string
 // is none; tests point it at an httptest server.
 type ClientFactory func() (*api.Client, error)
 
-// server is the state every tool handler shares. It holds the factory, not a
+// server is the state every tool handler shares. It holds a factory, not a
 // client — see rule 2 in the package comment.
+//
+// clientFor builds the client for one tool call. On stdio (New) it ignores
+// the request and reads the token from the user's config; in the hosted mode
+// (bearerClient in http.go) it takes the token from the request itself.
 type server struct {
-	newClient ClientFactory
+	clientFor func(req *mcp.CallToolRequest) (*api.Client, error)
 }
 
 // New builds the MCP server. version is the build stamp
@@ -75,8 +81,15 @@ type server struct {
 // The server is returned unconnected: the caller picks the transport (stdio
 // for `investviews mcp`, in-memory for tests).
 func New(newClient ClientFactory, version string, logger *slog.Logger) *mcp.Server {
-	s := &server{newClient: newClient}
+	return build(&server{
+		clientFor: func(*mcp.CallToolRequest) (*api.Client, error) { return newClient() },
+	}, version, logger)
+}
 
+// build is New for either kind of server: the stdio one from New, and the
+// hosted one from NewHTTPHandler. Both get the same tools, instructions and
+// per-call deadline, so the local and the hosted server cannot drift apart.
+func build(s *server, version string, logger *slog.Logger) *mcp.Server {
 	serverOpts := &mcp.ServerOptions{
 		Instructions: instructions,
 		// ⚠️ THE TOOLS CAPABILITY IS SET EXPLICITLY. The SDK only infers it

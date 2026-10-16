@@ -44,6 +44,11 @@ import (
 // httptest server, which is why no command in here builds its own.
 type Deps struct {
 	NewClient func() (*api.Client, error)
+
+	// APIURL resolves the API base URL alone, with no token. Only the hosted
+	// MCP mode (`investviews mcp --http`) reads it: there every request
+	// brings its own token, and the operator's saved one must never be used.
+	APIURL func() string
 }
 
 func (d Deps) client() (*api.Client, error) {

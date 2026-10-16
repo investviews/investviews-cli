@@ -8,7 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -37,10 +43,15 @@ const mcpConfigLine = `{"mcpServers": {"investviews": {"command": "investviews",
 // `initialize` with no credential; a call that needs one returns ErrNoToken
 // as a tool error the agent can relay. A user who logs in while the agent
 // runs does not have to restart it.
+//
+// ⚠️ --http IS A DIFFERENT TRUST MODEL. On stdio the server acts for the one
+// user who runs it, with their saved token. With --http it is one shared
+// server for many users, and every request brings its own token — see
+// serveHTTP and internal/mcpserver/http.go.
 func NewMCPCmd(deps Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Serve the API to an AI agent as MCP tools over stdio",
+		Short: "Serve the API to an AI agent as MCP tools over stdio (or HTTP with --http)",
 		Long: `Serve the InvestViews API to an AI agent (Claude Desktop, Claude Code,
 Cursor, …) as MCP (Model Context Protocol) tools, over standard input and
 output.
@@ -58,12 +69,45 @@ Tools: find_place, browse_places, place_at_point, coverage, filters and usage
 are FREE. market_stats and price_history spend one metered call each;
 compare_places spends one per place.
 
-Standard output carries only protocol messages. Logs go to standard error.`,
+Standard output carries only protocol messages. Logs go to standard error.
+
+HOSTED MODE. With --http the same tools are served over Streamable HTTP
+instead, for agents that connect to a URL and sign in with OAuth. This is how
+https://mcp.investviews.ai/mcp runs; you do not need it on your computer:
+
+  investviews mcp --http 127.0.0.1:8090 --public-url https://mcp.investviews.ai --auth-server https://api.investviews.ai
+
+Every request must carry its own bearer token, and every API call is sent with
+that token. The saved token and INVESTVIEWS_TOKEN are never used in this mode,
+and the config file is not read: INVESTVIEWS_API_URL alone picks the API.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 	}
 
+	var hosted hostedFlags
+	cmd.Flags().StringVar(&hosted.addr, "http", "",
+		"serve over Streamable HTTP on this address (host:port) instead of stdio; every request needs a bearer token")
+	cmd.Flags().StringVar(&hosted.publicURL, "public-url", mcpserver.DefaultPublicURL,
+		"with --http: the public origin agents use, with no path; the protected resource is <public-url>/mcp")
+	cmd.Flags().StringVar(&hosted.authServer, "auth-server", mcpserver.DefaultAuthServer,
+		"with --http: the OAuth authorization server named in the protected resource metadata")
+	// Test-only: an end-to-end test revokes a token and waits for the server
+	// to notice, which takes one cache lifetime. Hidden from --help.
+	cmd.Flags().DurationVar(&hosted.tokenCacheTTL, "token-cache-ttl", 0,
+		"with --http: how long one token check is trusted (0 keeps the default)")
+	_ = cmd.Flags().MarkHidden("token-cache-ttl")
+
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		if hosted.addr == "" {
+			for _, name := range []string{"public-url", "auth-server", "token-cache-ttl"} {
+				if cmd.Flags().Changed(name) {
+					return fmt.Errorf("--%s only applies with --http", name)
+				}
+			}
+		} else {
+			return serveHTTP(cmd, deps, hosted)
+		}
+
 		stderr := cmd.ErrOrStderr()
 		logger := slog.New(slog.NewTextHandler(stderr, nil))
 		srv := mcpserver.New(deps.client, version.Version, logger)
@@ -84,6 +128,93 @@ Standard output carries only protocol messages. Logs go to standard error.`,
 		return err
 	}
 	return cmd
+}
+
+// hostedFlags are the --http mode's flags.
+type hostedFlags struct {
+	addr          string
+	publicURL     string
+	authServer    string
+	tokenCacheTTL time.Duration
+}
+
+// shutdownTimeout is how long a stopping hosted server waits for requests in
+// flight. A request accepted just before the stop first has its token checked
+// (up to VerifyTimeout) and only then starts its tool call (up to
+// ToolTimeout), so the wait covers both plus a few seconds to write the
+// answer. The systemd unit's TimeoutStopSec must stay above it.
+const shutdownTimeout = mcpserver.VerifyTimeout + mcpserver.ToolTimeout + 5*time.Second
+
+// serveHTTP runs the hosted mode until the command's context ends or the
+// process gets SIGINT or SIGTERM (a service manager's stop).
+//
+// ⚠️ THE OPERATOR'S TOKEN IS NEVER READ HERE. Only deps.APIURL is used, never
+// deps.NewClient: a hosted server that fell back to a saved token would answer
+// every agent with the operator's quota. Each request's own bearer token is
+// the only credential (internal/mcpserver/http.go).
+//
+// Stdout stays empty in this mode too; the start line and logs go to stderr,
+// which the service manager keeps as the journal.
+func serveHTTP(cmd *cobra.Command, deps Deps, flags hostedFlags) error {
+	stderr := cmd.ErrOrStderr()
+	if flags.tokenCacheTTL < 0 {
+		return fmt.Errorf("--token-cache-ttl must not be negative, got %s", flags.tokenCacheTTL)
+	}
+	apiURL := deps.APIURL()
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	handler, err := mcpserver.NewHTTPHandler(mcpserver.HTTPOptions{
+		PublicURL:  flags.publicURL,
+		AuthServer: flags.authServer,
+		APIURL:     apiURL,
+		Version:    version.Version,
+		Logger:     logger,
+		CacheTTL:   flags.tokenCacheTTL,
+	})
+	if err != nil {
+		return err
+	}
+
+	listener, err := net.Listen("tcp", flags.addr)
+	if err != nil {
+		return fmt.Errorf("cannot listen on %s: %w", flags.addr, err)
+	}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout covers reading the request only; net/http clears the
+		// read deadline once the body is read, so a streamed answer is not
+		// cut by it.
+		ReadTimeout: 30 * time.Second,
+		// No WriteTimeout: a streamed answer may legitimately take up to
+		// ToolTimeout, and each tool call has its own deadline already.
+		IdleTimeout: 2 * time.Minute,
+		ErrorLog:    slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
+
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Fprintf(stderr, "investviews mcp %s: serving MCP over HTTP on http://%s%s (public %s%s, API %s); logs on stderr\n",
+		version.Version, listener.Addr(), mcpserver.MCPPath,
+		strings.TrimRight(flags.publicURL, "/"), mcpserver.MCPPath, apiURL)
+
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(listener) }()
+
+	select {
+	case err := <-served:
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("stopping the HTTP server: %w", err)
+	}
+	if err := <-served; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // nopWriteCloser lets the command's stdout serve as the transport's writer

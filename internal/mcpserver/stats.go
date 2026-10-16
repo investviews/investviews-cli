@@ -184,14 +184,14 @@ type marketStatsArgs struct {
 	statsFilterArgs
 }
 
-func (s *server) marketStats(ctx context.Context, _ *mcp.CallToolRequest, args marketStatsArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) marketStats(ctx context.Context, req *mcp.CallToolRequest, args marketStatsArgs) (*mcp.CallToolResult, any, error) {
 	params := args.territoryArgs.params()
 	args.statsFilterArgs.apply(&params)
 
 	if err := checkCells(params); err != nil {
 		return fail(err)
 	}
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}
@@ -365,7 +365,7 @@ type priceHistoryArgs struct {
 // local check would refuse a range the server may one day accept.
 const maxHistoryPeriods = 24
 
-func (s *server) priceHistory(ctx context.Context, _ *mcp.CallToolRequest, args priceHistoryArgs) (*mcp.CallToolResult, any, error) {
+func (s *server) priceHistory(ctx context.Context, req *mcp.CallToolRequest, args priceHistoryArgs) (*mcp.CallToolResult, any, error) {
 	params := api.HistoryParams{
 		StatsParams: args.territoryArgs.params(),
 		From:        strings.TrimSpace(args.From),
@@ -376,7 +376,7 @@ func (s *server) priceHistory(ctx context.Context, _ *mcp.CallToolRequest, args 
 	if err := checkCells(params.StatsParams); err != nil {
 		return fail(err)
 	}
-	c, err := s.client()
+	c, err := s.client(req)
 	if err != nil {
 		return fail(err)
 	}

@@ -68,6 +68,34 @@ the same typed client as the matching command, so the same billing applies.
   `compare_places`, every place together. When it runs out, the request in flight is cancelled and
   `compare_places` stops with `stopped: timed_out`, keeping the rows it already has.
 
+### Hosted MCP (`investviews mcp --http`)
+
+The hosted server at `https://mcp.investviews.ai/mcp` runs the same tools over Streamable HTTP
+(stateless). It holds no token of its own: each request must carry a bearer token, and every tool
+call is sent to the API with that token.
+
+| path | auth | what |
+|---|---|---|
+| `POST /mcp` | bearer token | the MCP protocol |
+| `GET /.well-known/oauth-protected-resource` | none | RFC 9728 metadata: `resource` = `<public-url>/mcp`, `authorization_servers` = [`<auth-server>`] |
+| `GET /.well-known/oauth-protected-resource/mcp` | none | the same document |
+| `GET /healthz` | none | `ok`, no API call |
+
+A request with no token, or a token the API refuses, gets `401` with
+`WWW-Authenticate: Bearer resource_metadata="<public-url>/.well-known/oauth-protected-resource"`.
+
+The token is checked with `GET /usage` (free) and the verdict is cached for 60 seconds per token
+(keyed by its SHA-256; tokens are never logged):
+
+| `/usage` answers | hosted server does | cached |
+|---|---|---|
+| `200` | token valid | yes |
+| `402` (plan ended) | token valid; the tool call then shows the API's reactivate message | yes |
+| `401` | `401` + `WWW-Authenticate` | yes |
+| `429`, `5xx`, any other status, network error | `503` + `Retry-After: 5` — never `401`, so an outage does not sign anyone out | **no** |
+
+So a token revoked in the account keeps working on the hosted server for at most 60 seconds.
+
 ### Billing, in the contract's own words
 
 `metadata` is free **by design, not by omission**: billing a client for resolving a place before it

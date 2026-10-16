@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -15,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/investviews/investviews-cli/internal/api"
+	"github.com/investviews/investviews-cli/internal/mcpserver"
 	"github.com/investviews/investviews-cli/internal/version"
 )
 
@@ -327,5 +333,257 @@ func TestCountingReaderDeliversBytesReturnedWithEOF(t *testing.T) {
 	n, err = r.Read(buf)
 	if n != 0 || err != io.EOF {
 		t.Errorf("second Read = %d, %v; want 0, io.EOF", n, err)
+	}
+}
+
+// ── hosted mode (--http) ─────────────────────────────────────────────────────
+// The handler itself is tested in internal/mcpserver; these prove the command
+// wiring: the flags, the start line, and a clean stop.
+
+// lockedBuffer is a buffer the running command writes to while the test
+// reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// hostedRoot is a root command whose Deps point the hosted mode at apiURL.
+// Its stdio factory fails the test: the hosted mode must never use the
+// operator's own token.
+func hostedRoot(t *testing.T, apiURL string, stdout, stderr io.Writer, args ...string) *cobra.Command {
+	t.Helper()
+	root := &cobra.Command{Use: "investviews", SilenceUsage: true, SilenceErrors: true}
+	deps := Deps{
+		NewClient: func() (*api.Client, error) {
+			t.Error("the hosted mode used the stdio client factory")
+			return nil, ErrNoToken
+		},
+		APIURL: func() string { return apiURL },
+	}
+	for _, sub := range All(deps) {
+		root.AddCommand(sub)
+	}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(args)
+	return root
+}
+
+var listenLine = regexp.MustCompile(`serving MCP over HTTP on (http://127\.0\.0\.1:\d+)`)
+
+func TestMCPHTTPServesUntilStopped(t *testing.T) {
+	var stdout, stderr lockedBuffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr, "mcp", "--http", "127.0.0.1:0")
+
+	base, stop := startHosted(t, root, &stderr)
+
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /healthz = %d, want 200", resp.StatusCode)
+	}
+
+	// The defaults are the production URLs.
+	resp, err = http.Get(base + "/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatalf("GET metadata: %v", err)
+	}
+	var doc struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&doc)
+	_ = resp.Body.Close()
+	if doc.Resource != "https://mcp.investviews.ai/mcp" {
+		t.Errorf("resource = %q, want https://mcp.investviews.ai/mcp", doc.Resource)
+	}
+	if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != "https://api.investviews.ai" {
+		t.Errorf("authorization_servers = %v, want [https://api.investviews.ai]", doc.AuthorizationServers)
+	}
+
+	resp, err = http.Post(base+"/mcp", "application/json", strings.NewReader(initializeFrame))
+	if err != nil {
+		t.Fatalf("POST /mcp: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /mcp with no token = %d, want 401", resp.StatusCode)
+	}
+
+	if err := stop(); err != nil {
+		t.Errorf("a stopped server returned %v, want nil", err)
+	}
+	if stdout.String() != "" {
+		t.Errorf("the hosted mode wrote to stdout: %q", stdout.String())
+	}
+}
+
+func TestMCPHTTPFlagsAreRefusedWithoutHTTP(t *testing.T) {
+	for flag, value := range map[string]string{
+		"--public-url":      "https://example.investviews.ai",
+		"--auth-server":     "https://example.investviews.ai",
+		"--token-cache-ttl": "1s",
+	} {
+		var stdout, stderr bytes.Buffer
+		root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr,
+			"mcp", flag, value)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "--http") {
+			t.Errorf("mcp %s without --http: err = %v, want one that names --http", flag, err)
+		}
+	}
+}
+
+func TestMCPHTTPRefusesABadPublicURL(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr,
+		"mcp", "--http", "127.0.0.1:0", "--public-url", "https://mcp.investviews.ai/mcp")
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "public URL") {
+		t.Errorf("err = %v, want a public URL error", err)
+	}
+}
+
+var errStopTimeout = errors.New("mcp --http did not stop within 5s of its context ending")
+
+// startHosted runs root and returns the base URL from the start line on
+// stderr, and a stop func that ends the server and returns what it returned.
+// The server is stopped when the test ends if the test did not stop it.
+func startHosted(t *testing.T, root *cobra.Command, stderr *lockedBuffer) (string, func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+
+	var once sync.Once
+	var stopErr error
+	stop := func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-done:
+			case <-time.After(5 * time.Second):
+				stopErr = errStopTimeout
+			}
+		})
+		return stopErr
+	}
+	t.Cleanup(func() {
+		if err := stop(); errors.Is(err, errStopTimeout) {
+			t.Error(err)
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if m := listenLine.FindStringSubmatch(stderr.String()); m != nil {
+			return m[1], stop
+		}
+		select {
+		case err := <-done:
+			done <- err // for stop
+			t.Fatalf("mcp --http exited early: %v\nstderr: %s", err, stderr.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no start line on stderr after 5s:\n%s", stderr.String())
+		}
+	}
+}
+
+// The hidden --token-cache-ttl flag exists for end-to-end tests that revoke a
+// token and wait for the server to notice. It must reach the token cache.
+//
+// The TTL is a whole second, not a few milliseconds: the two quick requests
+// must land inside it even on a slow machine under -race.
+func TestMCPHTTPTokenCacheTTLFlagShortensTheCache(t *testing.T) {
+	var checks atomic.Int32
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/usage" {
+			checks.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer fakeAPI.Close()
+
+	var stdout, stderr lockedBuffer
+	root := hostedRoot(t, fakeAPI.URL+"/public/v1", &stdout, &stderr,
+		"mcp", "--http", "127.0.0.1:0", "--token-cache-ttl", "1s")
+	base, _ := startHosted(t, root, &stderr)
+
+	post := func() {
+		req, _ := http.NewRequest(http.MethodPost, base+"/mcp", strings.NewReader(initializeFrame))
+		req.Header.Set("Authorization", "Bearer iv_live_ro_"+strings.Repeat("t", 32))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /mcp: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /mcp = %d, want 200", resp.StatusCode)
+		}
+	}
+
+	post()
+	post()
+	if got := checks.Load(); got != 1 {
+		t.Fatalf("token checks after two quick requests = %d, want 1 (cached)", got)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	post()
+	if got := checks.Load(); got != 2 {
+		t.Errorf("token checks after the TTL passed = %d, want 2", got)
+	}
+}
+
+func TestMCPHTTPTokenCacheTTLFlagIsHidden(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr, "mcp", "--help")
+	if err := root.Execute(); err != nil {
+		t.Fatalf("mcp --help: %v", err)
+	}
+	if strings.Contains(stdout.String(), "token-cache-ttl") {
+		t.Error("--token-cache-ttl shows in --help; it is a test-only flag")
+	}
+}
+
+func TestMCPHTTPRefusesANegativeTokenCacheTTL(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr,
+		"mcp", "--http", "127.0.0.1:0", "--token-cache-ttl", "-1s")
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "token-cache-ttl") {
+		t.Errorf("err = %v, want one that names --token-cache-ttl", err)
+	}
+}
+
+// A request accepted just before SIGTERM first has its token checked (up to
+// mcpserver.VerifyTimeout) and only then starts its tool call (up to
+// mcpserver.ToolTimeout). The stop must wait for both, plus time to write the
+// answer.
+func TestShutdownTimeoutCoversVerifyAndToolCall(t *testing.T) {
+	need := mcpserver.VerifyTimeout + mcpserver.ToolTimeout
+	if shutdownTimeout <= need {
+		t.Fatalf("shutdownTimeout = %s, want more than verify %s + tool %s = %s",
+			shutdownTimeout, mcpserver.VerifyTimeout, mcpserver.ToolTimeout, need)
 	}
 }

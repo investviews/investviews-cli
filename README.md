@@ -70,9 +70,72 @@ The CLI must still be installed and logged in (steps 2 and 3).
 
 ## Use with MCP
 
-`investviews mcp` is an MCP (Model Context Protocol) server. It gives an AI agent the API as typed
-tools, so the agent does not have to run shell commands. The agent starts the server itself; you
-never run `investviews mcp` by hand.
+InvestViews is an MCP (Model Context Protocol) server. It gives an AI agent the API as typed tools,
+so the agent does not have to run shell commands. There are two ways to connect: the hosted server
+(nothing to install) and the local server (`investviews mcp`, runs on your computer). Both serve the
+same tools.
+
+### Hosted server — nothing to install
+
+Add this URL to your agent as a remote MCP server. In Claude Desktop and claude.ai: Customize →
+Connectors → + Add → Add custom connector (older versions call it Settings → Connectors):
+
+```
+https://mcp.investviews.ai/mcp
+```
+
+Click **Connect**. A sign-in window opens on investviews.ai; sign in and click **Allow**. The agent
+gets its own read-only API token. It is listed in your account under API tokens, and removing it
+there disconnects the agent. The tools need a PRO plan.
+
+In Claude Code:
+
+```sh
+claude mcp add --transport http investviews https://mcp.investviews.ai/mcp
+```
+
+The hosted server is `investviews mcp --http` (see `investviews mcp --help`). It checks each token
+with the API at most once a minute and sends every API call with the caller's own token, so
+metering, plan checks and revocation work exactly as for the CLI.
+
+### Running the hosted server yourself
+
+You do not need this to use InvestViews: the URL above is already running. It is here for anyone who
+runs their own copy. It needs `investviews` v0.4.0 or newer (`investviews mcp --help` lists `--http`).
+
+```sh
+investviews mcp --http 127.0.0.1:8090 \
+  --public-url https://mcp.investviews.ai \
+  --auth-server https://api.investviews.ai
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--http <host:port>` | off (stdio) | serve Streamable HTTP on this address instead of stdio. Every request needs a bearer token |
+| `--public-url <origin>` | `https://mcp.investviews.ai` | the public origin agents use, with no path. The protected resource is `<public-url>/mcp` |
+| `--auth-server <origin>` | `https://api.investviews.ai` | the OAuth authorization server named in the protected resource metadata |
+
+`--public-url` and `--auth-server` are refused without `--http`. The server answers on:
+
+| Path | What |
+|---|---|
+| `POST /mcp` | the MCP endpoint (bearer token required; a missing or bad token gets `401` with a `WWW-Authenticate` header pointing at the metadata) |
+| `GET /.well-known/oauth-protected-resource` and `.../mcp` | the protected resource metadata |
+| `GET /healthz` | `ok`; makes no API call |
+
+Put it behind a TLS proxy that does not buffer responses (some answers are streamed as server-sent
+events). It stops cleanly on `SIGTERM` and lets requests in flight finish first. It reads the API
+base from `INVESTVIEWS_API_URL` only; it never reads the config file, so the service user needs no
+home directory.
+
+The OAuth flow issues tokens for `<public-url>/mcp` only, but the server itself does not check which
+resource a token was issued for: it asks the API whether the token is valid, so any valid InvestViews
+API token works at `/mcp`. The tools are read-only.
+
+### Local server — `investviews mcp`
+
+Use this instead if you want the server on your own computer. The agent starts it itself; you never
+run `investviews mcp` by hand.
 
 **First, install the binary and log in** — steps 2 and 3 of the quick start. The server uses the
 same token as the CLI. It starts without a token, but every tool call then fails with an error that
@@ -185,7 +248,7 @@ either stops to ask permission it does not need, or burns quota it did not have 
 | `geo hexes <geo_id>` | free | list a place's H3 cells (`--ids-only` for a pipe) |
 | `coverage` | free | which markets are served, and how fresh each is |
 | `usage` | free | what this token has spent and has left |
-| `mcp` | free to start (the tools it serves may be metered) | serve the API to an AI agent as MCP tools over stdio — see [Use with MCP](#use-with-mcp) |
+| `mcp` | free to start (the tools it serves may be metered) | serve the API to an AI agent as MCP tools over stdio, or over HTTP with `--http` — see [Use with MCP](#use-with-mcp) |
 | **`stats current`** | **METERED** | figures for the newest built period |
 | **`stats history`** | **METERED** | the same figures, period by period |
 

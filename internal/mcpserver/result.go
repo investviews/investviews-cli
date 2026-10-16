@@ -28,8 +28,14 @@ const retryBudget = 10 * time.Second
 // comment) and caps its retry waits. A factory error — ErrNoToken when no
 // token is saved — is returned as is, so the handler turns it into a tool
 // error on this call.
-func (s *server) client() (*api.Client, error) {
-	c, err := s.newClient()
+//
+// req is the call being answered. On stdio it is not read: the factory finds
+// the token in the config, as the CLI does. In the hosted mode (http.go) the
+// token is the caller's OWN bearer token, taken from req.Extra.TokenInfo, so
+// one shared server sends every call with the token of the request that made
+// it. req may be nil only on stdio (and in tests that call a helper directly).
+func (s *server) client(req *mcp.CallToolRequest) (*api.Client, error) {
+	c, err := s.clientFor(req)
 	if err != nil {
 		return nil, err
 	}
