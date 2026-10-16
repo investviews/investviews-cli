@@ -77,8 +77,8 @@ same tools.
 
 ### Hosted server — nothing to install
 
-Add this URL to your agent as a remote MCP server (in Claude Desktop and claude.ai: Settings →
-Connectors → Add custom connector):
+Add this URL to your agent as a remote MCP server. In Claude Desktop and claude.ai: Customize →
+Connectors → + Add → Add custom connector (older versions call it Settings → Connectors):
 
 ```
 https://mcp.investviews.ai/mcp
@@ -97,6 +97,35 @@ claude mcp add --transport http investviews https://mcp.investviews.ai/mcp
 The hosted server is `investviews mcp --http` (see `investviews mcp --help`). It checks each token
 with the API at most once a minute and sends every API call with the caller's own token, so
 metering, plan checks and revocation work exactly as for the CLI.
+
+### Running the hosted server yourself
+
+You do not need this to use InvestViews: the URL above is already running. It is here for anyone who
+runs their own copy.
+
+```sh
+investviews mcp --http 127.0.0.1:8090 \
+  --public-url https://mcp.investviews.ai \
+  --auth-server https://api.investviews.ai
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--http <host:port>` | off (stdio) | serve Streamable HTTP on this address instead of stdio. Every request needs a bearer token |
+| `--public-url <origin>` | `https://mcp.investviews.ai` | the public origin agents use, with no path. The protected resource is `<public-url>/mcp` |
+| `--auth-server <origin>` | `https://api.investviews.ai` | the OAuth authorization server named in the protected resource metadata |
+
+`--public-url` and `--auth-server` are refused without `--http`. The server answers on:
+
+| Path | What |
+|---|---|
+| `POST /mcp` | the MCP endpoint (bearer token required; a missing or bad token gets `401` with a `WWW-Authenticate` header pointing at the metadata) |
+| `GET /.well-known/oauth-protected-resource` and `.../mcp` | the protected resource metadata |
+| `GET /healthz` | `ok`; makes no API call |
+
+Put it behind a TLS proxy that does not buffer responses (some answers are streamed as server-sent
+events). It stops cleanly on `SIGTERM` and lets requests in flight finish first. It reads the API
+base from `INVESTVIEWS_API_URL` and, like every command, needs a home directory for its config path.
 
 ### Local server — `investviews mcp`
 
