@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -385,27 +386,7 @@ func TestMCPHTTPServesUntilStopped(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	root := hostedRoot(t, "http://127.0.0.1:1/public/v1", &stdout, &stderr, "mcp", "--http", "127.0.0.1:0")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- root.ExecuteContext(ctx) }()
-
-	var base string
-	deadline := time.Now().Add(5 * time.Second)
-	for base == "" {
-		if m := listenLine.FindStringSubmatch(stderr.String()); m != nil {
-			base = m[1]
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("mcp --http exited early: %v\nstderr: %s", err, stderr.String())
-		case <-time.After(10 * time.Millisecond):
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no start line on stderr after 5s:\n%s", stderr.String())
-		}
-	}
+	base, stop := startHosted(t, root, &stderr)
 
 	resp, err := http.Get(base + "/healthz")
 	if err != nil {
@@ -443,14 +424,8 @@ func TestMCPHTTPServesUntilStopped(t *testing.T) {
 		t.Errorf("POST /mcp with no token = %d, want 401", resp.StatusCode)
 	}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("a stopped server returned %v, want nil", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("mcp --http did not stop within 5s of its context ending")
+	if err := stop(); err != nil {
+		t.Errorf("a stopped server returned %v, want nil", err)
 	}
 	if stdout.String() != "" {
 		t.Errorf("the hosted mode wrote to stdout: %q", stdout.String())
@@ -483,30 +458,44 @@ func TestMCPHTTPRefusesABadPublicURL(t *testing.T) {
 	}
 }
 
-// startHosted runs root until the test ends and returns the base URL from the
-// start line on stderr.
-func startHosted(t *testing.T, root *cobra.Command, stderr *lockedBuffer) string {
+var errStopTimeout = errors.New("mcp --http did not stop within 5s of its context ending")
+
+// startHosted runs root and returns the base URL from the start line on
+// stderr, and a stop func that ends the server and returns what it returned.
+// The server is stopped when the test ends if the test did not stop it.
+func startHosted(t *testing.T, root *cobra.Command, stderr *lockedBuffer) (string, func() error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- root.ExecuteContext(ctx) }()
+
+	var once sync.Once
+	var stopErr error
+	stop := func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-done:
+			case <-time.After(5 * time.Second):
+				stopErr = errStopTimeout
+			}
+		})
+		return stopErr
+	}
 	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("mcp --http did not stop within 5s of its context ending")
+		if err := stop(); errors.Is(err, errStopTimeout) {
+			t.Error(err)
 		}
 	})
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if m := listenLine.FindStringSubmatch(stderr.String()); m != nil {
-			return m[1]
+			return m[1], stop
 		}
 		select {
 		case err := <-done:
-			done <- err // for the cleanup
+			done <- err // for stop
 			t.Fatalf("mcp --http exited early: %v\nstderr: %s", err, stderr.String())
 		case <-time.After(10 * time.Millisecond):
 		}
@@ -523,19 +512,19 @@ func startHosted(t *testing.T, root *cobra.Command, stderr *lockedBuffer) string
 // must land inside it even on a slow machine under -race.
 func TestMCPHTTPTokenCacheTTLFlagShortensTheCache(t *testing.T) {
 	var checks atomic.Int32
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/public/v1/usage" {
 			checks.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`)
 	}))
-	defer api.Close()
+	defer fakeAPI.Close()
 
 	var stdout, stderr lockedBuffer
-	root := hostedRoot(t, api.URL+"/public/v1", &stdout, &stderr,
+	root := hostedRoot(t, fakeAPI.URL+"/public/v1", &stdout, &stderr,
 		"mcp", "--http", "127.0.0.1:0", "--token-cache-ttl", "1s")
-	base := startHosted(t, root, &stderr)
+	base, _ := startHosted(t, root, &stderr)
 
 	post := func() {
 		req, _ := http.NewRequest(http.MethodPost, base+"/mcp", strings.NewReader(initializeFrame))

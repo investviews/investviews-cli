@@ -193,9 +193,9 @@ func NewHTTPHandler(opts HTTPOptions) (http.Handler, error) {
 	if now == nil {
 		now = time.Now
 	}
+	userAgent := api.DefaultUserAgent + "-mcp/" + opts.Version
 	newClient := opts.NewClient
 	if newClient == nil {
-		userAgent := api.DefaultUserAgent + "-mcp/" + opts.Version
 		newClient = func(token string) (*api.Client, error) {
 			return api.New(api.Options{BaseURL: apiURL, Token: token, UserAgent: userAgent})
 		}
@@ -223,7 +223,7 @@ func NewHTTPHandler(opts HTTPOptions) (http.Handler, error) {
 
 	resource := publicURL + MCPPath
 	metadataURL := publicURL + ProtectedResourcePath
-	v := newVerifier(apiURL, ttl, opts.HTTPClient, logger, now)
+	v := newVerifier(apiURL, userAgent, ttl, opts.HTTPClient, logger, now)
 	// ⚠️ AllowMissingExpiration: API tokens do not expire, so TokenInfo has
 	// no Expiration, and RequireBearerToken refuses that by default ("token
 	// missing expiration", 401). How long a verdict holds is the cache's job.
@@ -335,23 +335,25 @@ func plausibleToken(token string) bool {
 // Other statuses (404 from a wrong API URL, 403 from a WAF) are this server's
 // problem, not the user's, so they are 503s too — and logged with the status.
 type verifier struct {
-	usageURL string
-	http     *http.Client
-	timeout  time.Duration
-	logger   *slog.Logger
-	cache    *tokenCache
+	usageURL  string
+	userAgent string
+	http      *http.Client
+	timeout   time.Duration
+	logger    *slog.Logger
+	cache     *tokenCache
 }
 
-func newVerifier(apiURL string, ttl time.Duration, httpClient *http.Client, logger *slog.Logger, now func() time.Time) *verifier {
+func newVerifier(apiURL, userAgent string, ttl time.Duration, httpClient *http.Client, logger *slog.Logger, now func() time.Time) *verifier {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return &verifier{
-		usageURL: strings.TrimRight(apiURL, "/") + string(api.EndpointUsage),
-		http:     httpClient,
-		timeout:  verifyTimeout,
-		logger:   logger,
-		cache:    newTokenCache(ttl, now),
+		usageURL:  strings.TrimRight(apiURL, "/") + string(api.EndpointUsage),
+		userAgent: userAgent,
+		http:      httpClient,
+		timeout:   verifyTimeout,
+		logger:    logger,
+		cache:     newTokenCache(ttl, now),
 	}
 }
 
@@ -404,7 +406,7 @@ func (v *verifier) check(ctx context.Context, token string) (int, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", api.DefaultUserAgent+"-mcp")
+	req.Header.Set("User-Agent", v.userAgent)
 	resp, err := v.http.Do(req)
 	if err != nil {
 		return 0, err

@@ -37,6 +37,8 @@ const (
 	otherToken = "iv_live_ro_other_11111111111111111111111111"
 	lapsedTok  = "iv_live_ro_lapsed_2222222222222222222222222"
 	badToken   = "iv_live_ro_bad_3333333333333333333333333333"
+
+	testUserAgent = api.DefaultUserAgent + "-mcp/test"
 )
 
 // hostedAPI is a fake public API that knows which tokens exist. It records
@@ -390,7 +392,7 @@ func TestVerifierMapsEveryStatus(t *testing.T) {
 			api := newHostedAPI(t)
 			api.setStatus(tc.outage)
 			clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-			v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, clock.Now)
+			v := newVerifier(api.server.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, clock.Now)
 
 			info, err := v.verify(context.Background(), tc.token, nil)
 			if tc.wantErr != nil {
@@ -417,7 +419,7 @@ func TestVerifierNetworkErrorIsUnavailable(t *testing.T) {
 	url := api.server.URL + "/public/v1"
 	api.server.Close()
 
-	v := newVerifier(url, TokenCacheTTL, nil, discard, time.Now)
+	v := newVerifier(url, testUserAgent, TokenCacheTTL, nil, discard, time.Now)
 	if _, err := v.verify(context.Background(), goodToken, nil); !errors.Is(err, errAPIUnavailable) {
 		t.Fatalf("err = %v, want errAPIUnavailable", err)
 	}
@@ -426,7 +428,7 @@ func TestVerifierNetworkErrorIsUnavailable(t *testing.T) {
 func TestVerifierCachesValidAndInvalidForTheTTL(t *testing.T) {
 	api := newHostedAPI(t)
 	clock := &fakeClock{now: time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)}
-	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, clock.Now)
+	v := newVerifier(api.server.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, clock.Now)
 	ctx := context.Background()
 
 	for range 3 {
@@ -485,7 +487,7 @@ func TestHTTPRevokedTokenIs401AfterTheTTL(t *testing.T) {
 // be an API token is refused here, so garbage never costs the API a request.
 func TestVerifierRefusesMalformedTokensWithoutAnAPICall(t *testing.T) {
 	api := newHostedAPI(t)
-	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
+	v := newVerifier(api.server.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, time.Now)
 
 	for name, token := range map[string]string{
 		"no prefix":        "abc",
@@ -515,6 +517,25 @@ func TestVerifierRefusesMalformedTokensWithoutAnAPICall(t *testing.T) {
 	}
 }
 
+// TestVerifierSendsItsUserAgent: the token check names the server and its
+// version, like every tool call does.
+func TestVerifierSendsItsUserAgent(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	v := newVerifier(srv.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, time.Now)
+	if _, err := v.verify(context.Background(), goodToken, nil); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got != testUserAgent {
+		t.Errorf("User-Agent = %q, want %q", got, testUserAgent)
+	}
+}
+
 // TestVerifierTimeoutIsUnavailable: a slow API is an outage, not a verdict.
 func TestVerifierTimeoutIsUnavailable(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -525,7 +546,7 @@ func TestVerifierTimeoutIsUnavailable(t *testing.T) {
 	}))
 	t.Cleanup(slow.Close)
 
-	v := newVerifier(slow.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
+	v := newVerifier(slow.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, time.Now)
 	v.timeout = 20 * time.Millisecond
 	if _, err := v.verify(context.Background(), goodToken, nil); !errors.Is(err, errAPIUnavailable) {
 		t.Fatalf("err = %v, want errAPIUnavailable", err)
@@ -609,7 +630,7 @@ func TestBearerClientNeverFallsBack(t *testing.T) {
 // for a minute after the API is back, and must not force a new sign-in.
 func TestVerifierDoesNotCacheAnOutage(t *testing.T) {
 	api := newHostedAPI(t)
-	v := newVerifier(api.server.URL+"/public/v1", TokenCacheTTL, nil, discard, time.Now)
+	v := newVerifier(api.server.URL+"/public/v1", testUserAgent, TokenCacheTTL, nil, discard, time.Now)
 	ctx := context.Background()
 
 	api.setStatus(http.StatusInternalServerError)
