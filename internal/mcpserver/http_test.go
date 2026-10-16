@@ -740,3 +740,64 @@ func (b *safeBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// A browser-based MCP client sends a CORS preflight before its first POST.
+// The preflight carries no token, so it must be answered before bearer auth.
+func TestHTTPPreflightIsAnsweredWithoutAToken(t *testing.T) {
+	api := newHostedAPI(t)
+	srv := hostedServer(t, api)
+
+	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://agent.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type, mcp-protocol-version")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /mcp: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Allow-Origin = %q, want *", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+		t.Errorf("Allow-Methods = %q, want it to include POST", got)
+	}
+	allowed := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers"))
+	for _, h := range []string{"authorization", "content-type", "mcp-session-id", "mcp-protocol-version", "last-event-id"} {
+		if !strings.Contains(allowed, h) {
+			t.Errorf("Allow-Headers = %q, want it to include %s", allowed, h)
+		}
+	}
+	if api.total() != 0 {
+		t.Errorf("a preflight reached the API %d times, want 0", api.total())
+	}
+}
+
+// Every /mcp response, the 401 included, carries the CORS headers, so a
+// browser client can read the status and WWW-Authenticate and start OAuth.
+func TestHTTPResponsesCarryCORSHeaders(t *testing.T) {
+	api := newHostedAPI(t)
+	srv := hostedServer(t, api)
+
+	for name, token := range map[string]string{"no token": "", "valid token": goodToken} {
+		t.Run(name, func(t *testing.T) {
+			resp := postMCP(t, srv, token, "")
+			if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Allow-Origin = %q, want *", got)
+			}
+			exposed := strings.ToLower(resp.Header.Get("Access-Control-Expose-Headers"))
+			for _, h := range []string{"mcp-session-id", "www-authenticate"} {
+				if !strings.Contains(exposed, h) {
+					t.Errorf("Expose-Headers = %q, want it to include %s", exposed, h)
+				}
+			}
+		})
+	}
+}

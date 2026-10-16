@@ -241,7 +241,7 @@ func NewHTTPHandler(opts HTTPOptions) (http.Handler, error) {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle(MCPPath, outageAs503(protected))
+	mux.Handle(MCPPath, withCORS(outageAs503(protected)))
 	mux.Handle(ProtectedResourcePath, metadata)
 	mux.Handle(ProtectedResourcePath+MCPPath, metadata)
 	mux.HandleFunc(HealthPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -491,6 +491,31 @@ type outageKey struct{}
 // the request through its context (verify runs synchronously on it), and this
 // wrapper rewrites only that one status, only on flagged requests. Every other
 // response passes through untouched.
+// withCORS lets a browser-based MCP client reach /mcp.
+//
+// A preflight (OPTIONS) carries no token, so it is answered here, before
+// bearer auth; otherwise the browser sees a 401 and never sends the POST.
+// Every other response gets Allow-Origin and Expose-Headers, so the client
+// can read the status, Mcp-Session-Id and WWW-Authenticate (the 401 that
+// starts OAuth). "*" is safe: auth is a bearer header only, no cookies, so a
+// foreign page gains nothing it could not do with the token directly.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "*")
+		h.Set("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate")
+		if r.Method == http.MethodOptions {
+			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Headers",
+				"Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID")
+			h.Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func outageAs503(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flag := &outageFlag{}
