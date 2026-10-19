@@ -599,7 +599,7 @@ func renderHistory(w io.Writer, resp *api.HistoryResponse) {
 		if resp.Availability != nil {
 			renderWhy(w, resp.Availability)
 		}
-		if resp.Snapshot.EarliestPeriod != "" {
+		if resp.Snapshot != nil && resp.Snapshot.EarliestPeriod != "" {
 			fmt.Fprintf(w, "History goes back to %s — widen --from, or drop it for the last 12 periods.\n",
 				resp.Snapshot.EarliestPeriod)
 		}

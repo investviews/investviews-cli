@@ -106,7 +106,7 @@ whether spending a metered stats call on it can pay off at all.`,
 		if all {
 			var (
 				rows      []api.GeoResult
-				parentRow *api.GeoResult
+				parentRow *api.GeoParent
 				meta      api.Meta
 				pages     int
 			)
@@ -172,7 +172,7 @@ func renderBrowse(w io.Writer, parentFlag, level string, resp *api.GeoResponse) 
 
 // browseHeader names which of --level's two meanings was used, in the output
 // and not only in the help text.
-func browseHeader(parentFlag, level string, parent *api.GeoResult) string {
+func browseHeader(parentFlag, level string, parent *api.GeoParent) string {
 	isCountry := looksLikeCountryCode(parentFlag)
 	name := strings.TrimSpace(parentFlag)
 	if parent != nil {
@@ -207,7 +207,7 @@ func browseHeader(parentFlag, level string, parent *api.GeoResult) string {
 // placeholder. The caller already holds that id — it is what it passed as
 // --parent — so a hint reading "<its geo_id>" asks it to go and find something
 // it is standing on, and a hint is only worth printing if it can be run.
-func renderEmptyBrowse(w io.Writer, parentFlag, level string, parent *api.GeoResult) {
+func renderEmptyBrowse(w io.Writer, parentFlag, level string, parent *api.GeoParent) {
 	name := strings.TrimSpace(parentFlag)
 	id := strings.TrimSpace(parentFlag)
 	if parent != nil {

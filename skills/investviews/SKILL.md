@@ -386,7 +386,9 @@ cost: METERED — group current · 1 request · 149 of 100000 used this cycle
 ```
 
 Two calls, one of them paid, and the citation is in the header line: period `2026-08-01`, window
-`2026-06-01 → 2026-08-31`, as of `2026-08-31`, USD.
+`2026-06-01 → 2026-08-31`, as of `2026-08-31`, USD. `as_of` is the last day of data behind the figures (the
+period's window end), not the day you asked. On `stats history`, `snapshot.as_of` is the window
+end of the NEWEST period in the range; each period carries its own `as_of`.
 
 ## Installing this plugin
 

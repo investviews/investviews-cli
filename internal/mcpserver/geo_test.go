@@ -393,3 +393,55 @@ func TestFindPlaceRefusesALimitBelowOne(t *testing.T) {
 		t.Errorf("sent %d requests, want 0", fake.hits())
 	}
 }
+
+// ⚠️ The API's parent_ref sends no kind and no prices_available. They must
+// not be invented: prices_available false on the parent reads as "this place
+// has no prices", which is not what the server said.
+func TestBrowsePlacesDoesNotInventParentFields(t *testing.T) {
+	session, _ := connectFake(t, freeJSON(`{
+	 "parent":{"geo_id":"R1","name":"Valencia","name_en":"Valencia","level":"city","country":"es",
+	  "ancestors":[{"geo_id":"es","name":"Spain","level":"country"}]},
+	 "results":[]}`))
+
+	res := callTool(t, session, "browse_places", map[string]any{"parent": "R1"})
+	if res.IsError {
+		t.Fatalf("browse_places failed: %s", textOf(t, res))
+	}
+	var payload struct {
+		Parent map[string]json.RawMessage `json:"parent"`
+	}
+	structured(t, res, &payload)
+	if payload.Parent == nil {
+		t.Fatal("structuredContent lost the parent")
+	}
+	for _, key := range []string{"kind", "prices_available", "has_data", "current_period", "reports_available"} {
+		if v, has := payload.Parent[key]; has {
+			t.Errorf("parent.%s = %s, but the server did not send it", key, v)
+		}
+	}
+	if got := string(payload.Parent["geo_id"]); got != `"R1"` {
+		t.Errorf("parent.geo_id = %s, want \"R1\"", got)
+	}
+	mustContain(t, textOf(t, res), "Under Valencia (city, geo_id R1).")
+}
+
+// An unknown_place with no suggestions must not point at them: the hint names
+// the tools that find a place instead.
+func TestFindPlaceMissWithoutSuggestionsPointsAtTheFreeTools(t *testing.T) {
+	session, _ := connectFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		freeHeaders(w)
+		writeBody(w, http.StatusNotFound, `{"error":"unknown_place","message":"No place matched qqq.",`+
+			`"docs_url":"d","query":"qqq","did_you_mean":[]}`)
+	})
+
+	res := callTool(t, session, "find_place", map[string]any{"q": "qqq"})
+	if !res.IsError {
+		t.Fatal("unknown_place must come back with isError")
+	}
+	text := textOf(t, res)
+	if strings.Contains(text, "did_you_mean") || strings.Contains(text, "Did you mean") {
+		t.Errorf("no suggestions were sent, but the text points at them:\n%s", text)
+	}
+	mustContain(t, text, "`find_place`")
+	mustContain(t, text, "`browse_places`")
+}

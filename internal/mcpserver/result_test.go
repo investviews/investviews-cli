@@ -411,3 +411,92 @@ func TestClientGivesUpOnALongRetryAfter(t *testing.T) {
 		t.Errorf("hits = %d, want 1 — a 60s wait is over the %v budget", f.hits(), retryBudget)
 	}
 }
+
+// ── cost in structuredContent ────────────────────────────────────────────────
+
+type decodedCost struct {
+	MeteredRequests *int   `json:"metered_requests"`
+	Group           string `json:"group"`
+	Limit           string `json:"limit"`
+	Used            *int64 `json:"used"`
+	ResetsAt        string `json:"resets_at"`
+	Text            string `json:"text"`
+}
+
+// A client that reads only structuredContent must still see what the call
+// spent. The payload's own fields stay where they were.
+func TestOkAddsTheCostObjectOnAMeteredCall(t *testing.T) {
+	f := newFakeAPI(t, meteredJSON(`{"currency":"USD","stats":[]}`))
+
+	res := callProbe(t, f.factory(t), statsProbe(api.StatsParams{GeoID: "es"}))
+	if res.IsError {
+		t.Fatalf("unexpected isError: %s", textOf(t, res))
+	}
+	var got struct {
+		Currency string      `json:"currency"`
+		Cost     decodedCost `json:"cost"`
+	}
+	structured(t, res, &got)
+	if got.Currency != "USD" {
+		t.Errorf("currency = %q, want the payload's fields kept at the top level", got.Currency)
+	}
+	c := got.Cost
+	if c.MeteredRequests == nil || *c.MeteredRequests != 1 || c.Group != "current" || c.Limit != "100000" ||
+		c.Used == nil || *c.Used != 138 || c.ResetsAt != "2026-10-11T12:30:25Z" {
+		t.Errorf("cost = %+v", c)
+	}
+	if c.Text != "cost: 1 metered request (group current, 138 of 100000 used this cycle)" {
+		t.Errorf("cost.text = %q", c.Text)
+	}
+	// The text line stays.
+	mustContain(t, textOf(t, res), "cost: 1 metered request")
+}
+
+// A free call says 0 in fields, though its text has no cost line.
+func TestOkAddsTheCostObjectOnAFreeCall(t *testing.T) {
+	f := newFakeAPI(t, freeJSON(`{"plan":"starter","groups":{}}`))
+
+	res := callProbe(t, f.factory(t), usageProbe)
+	if res.IsError {
+		t.Fatalf("unexpected isError: %s", textOf(t, res))
+	}
+	var got struct {
+		Cost decodedCost `json:"cost"`
+	}
+	structured(t, res, &got)
+	if got.Cost.MeteredRequests == nil || *got.Cost.MeteredRequests != 0 || got.Cost.Limit != api.Uncounted {
+		t.Errorf("cost = %+v, want 0 metered requests, limit uncounted", got.Cost)
+	}
+}
+
+// No quota headers: metered_requests is null — unknown, never 0.
+func TestWithCostWithoutQuotaHeadersIsUnknown(t *testing.T) {
+	raw, err := json.Marshal(withCost(map[string]any{"a": 1}, api.Meta{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		A    int                        `json:"a"`
+		Cost map[string]json.RawMessage `json:"cost"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if got.A != 1 || string(got.Cost["metered_requests"]) != "null" {
+		t.Errorf("got %s, want a kept and metered_requests null", raw)
+	}
+	if !strings.Contains(string(got.Cost["text"]), "unknown") {
+		t.Errorf("cost.text = %s", got.Cost["text"])
+	}
+}
+
+// An empty object gets the cost without a stray comma.
+func TestWithCostOnAnEmptyObject(t *testing.T) {
+	raw, err := json.Marshal(withCost(struct{}{}, api.Meta{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !json.Valid(raw) || !strings.HasPrefix(string(raw), `{"cost":`) {
+		t.Errorf("got %s", raw)
+	}
+}

@@ -42,7 +42,8 @@ none, else pick another place. A null date means nothing in the window the API s
   price of one flat and not a sale price. Say "median asking price", never just "price".
 - Always show the median asking price per m². It is the one figure you can compare across places.
   Also show the median asking price and the median size.
-- Name the place and the period (window, as-of date, currency). Never call it a live price.
+- Name the place and the period (window, as-of date, currency). Never call it a live price. The
+  as-of date is the last day of data behind the figures (the window_end), not today.
 - Price filters are always in USD, whatever currency the figures are shown in.
 - Never add figures across periods. Compare them.
 - Mark anything you computed (gross yield = 12 x median rent / median price, or a figure built from
