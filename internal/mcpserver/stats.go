@@ -40,7 +40,7 @@ Name the territory with EXACTLY ONE of:
 - lat + lng + radius_km — a circle (res optional, for this selector only).
 Two selectors are refused before any request is sent, so the mistake costs nothing.
 
-Resolve the place with the free tools first and spend this once. The figures describe one PERIOD (cite period, window and as_of), never today. An empty answer is normal, not a zero: its availability reason says what to do next. ⚠️ Price filters are USD whatever currency displays.`,
+Resolve the place with the free tools first and spend this once. The figures describe one PERIOD (cite period, window and as_of), never today. as_of is the last day of data behind the figures — the period's window_end — not the day you asked. An empty answer is normal, not a zero: its availability reason says what to do next. ⚠️ Price filters are USD whatever currency displays.`,
 	}, s.marketStats)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -52,7 +52,7 @@ Name the territory exactly as for market_stats: ONE of geo_id, h3, or lat + lng 
 
 from and to are a period (2025-02) or any date inside one. from omitted gives the LAST 12 PERIODS, not the whole history; to omitted is the newest built period. A range longer than 24 periods is REFUSED, not truncated — split it into ranges of 24 periods or fewer, one call each.
 
-⚠️ POINTS ARE NOT ADDITIVE. Each point is an independent aggregate over its own window, and rolling_3m windows overlap by two months. Compare points and draw a line; never sum them. Use this, not market_stats, when market_stats came back empty with period_not_built.`,
+⚠️ POINTS ARE NOT ADDITIVE. Each point is an independent aggregate over its own window, and rolling_3m windows overlap by two months. Compare points and draw a line; never sum them. Each point's as_of is its own window_end; snapshot.as_of is the window_end of the NEWEST period in the range, and snapshot is absent when the range holds no period. Use this, not market_stats, when market_stats came back empty with period_not_built.`,
 	}, s.priceHistory)
 }
 
@@ -433,7 +433,7 @@ func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
 		if resp.Availability != nil {
 			b.WriteString(availabilityText(resp.Availability))
 		}
-		if resp.Snapshot.EarliestPeriod != "" {
+		if resp.Snapshot != nil && resp.Snapshot.EarliestPeriod != "" {
 			fmt.Fprintf(&b, "History goes back to %s — move from earlier, or drop it for the last 12 periods.\n",
 				resp.Snapshot.EarliestPeriod)
 		}
@@ -455,6 +455,13 @@ func historyText(args priceHistoryArgs, resp *api.HistoryResponse) string {
 				b.WriteString(approx)
 			}
 		}
+	}
+	// snapshot.as_of names ONE date for the whole range, so say which: the
+	// newest period's window_end. Read alone it looks like "the series is
+	// as of", which is true only of its last point.
+	if resp.Snapshot != nil && resp.Snapshot.AsOf != nil {
+		fmt.Fprintf(&b, "snapshot.as_of %s = the window_end of the newest period in this range, not today.\n",
+			*resp.Snapshot.AsOf)
 	}
 
 	// A series whose every period came back empty is a column of dashes; the

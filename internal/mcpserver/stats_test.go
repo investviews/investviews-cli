@@ -19,7 +19,7 @@ const currentReply = `{"as_of":"2026-08-31","currency":"EUR","resolution":null,"
  "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":[],
    "min_size":null,"max_size":null,"min_price_usd":null,"max_price_usd":null,
    "units":{"size":"m2","price":"USD"},"note":"Price filters are USD."},
- "snapshot":{"as_of":"2026-08-01","built":"2026-09-05","earliest_period":"2024-03-01"},
+ "snapshot":{"as_of":"2026-08-31","built":"monthly","earliest_period":"2024-03-01"},
  "stats":[{"h3":"","estimated":false,"low_confidence":false,"name":"València","zone_level":"city",
    "median_price_per_sqm":3120,"median_price":285000,"median_area":92,
    "p05_price_per_sqm":1800,"p95_price_per_sqm":5200}],
@@ -34,7 +34,7 @@ const emptyReply = `{"as_of":"2026-08-31","currency":"USD","period":"2026-08-01"
  "territory":{"selector":"geo_id","hex_count":0,"geo_id":"R344953","grain":"geo"},
  "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy","rooms":["5+"],
    "units":{"size":"m2","price":"USD"},"note":""},
- "snapshot":{"as_of":"2026-08-01","built":"2026-09-05","earliest_period":"2024-03-01"},
+ "snapshot":{"as_of":"2026-08-31","built":"monthly","earliest_period":"2024-03-01"},
  "stats":[],
  "availability":{"status":"no_data","reason":"no_data_for_selection",
    "message":"This place holds data, but none matched your filters.",
@@ -530,7 +530,7 @@ const historyReply = `{"currency":"EUR","resolution":null,
    "as_of":"2026-08-31","fx_date":"2026-08-15","stats":[],
    "availability":{"status":"no_data","reason":"below_minimum_sample","message":"Too few listings."}}],
  "series_note":"Each point is an independent aggregate; points are NOT additive.",
- "snapshot":{"as_of":"2026-08-01","built":"2026-09-05","earliest_period":"2024-03-01"},
+ "snapshot":{"as_of":"2026-08-31","built":"monthly","earliest_period":"2024-03-01"},
  "availability":{"status":"ok","reason":null,"message":"","searched_from":"2024-03-01",
    "earliest_nonempty_period":"2024-03-01","latest_nonempty_period":"2026-07-01"}}`
 
@@ -905,4 +905,44 @@ func TestMarketStatsStatesBinApproximations(t *testing.T) {
 	text := textOf(t, callTool(t, session, "market_stats", map[string]any{"geo_id": "R344953", "min_size": 50, "max_size": 100}))
 	mustContain(t, text, `size_m2 {"requested":[50,100],"effective":[48,105]}`)
 	mustContain(t, text, "EFFECTIVE bounds")
+}
+
+// snapshot.as_of is ONE date for the whole range. The text says which: the
+// newest period's window_end, not today and not every point's.
+func TestPriceHistorySaysWhatSnapshotAsOfIs(t *testing.T) {
+	session, _ := connectFake(t, historyJSON(historyReply))
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953"})
+	if res.IsError {
+		t.Fatalf("price_history failed: %s", textOf(t, res))
+	}
+	mustContain(t, textOf(t, res),
+		"snapshot.as_of 2026-08-31 = the window_end of the newest period in this range, not today.")
+}
+
+// ⚠️ A range with no period gets snapshot: null from the API — there is no
+// newest period to name. It must not come back out as an object of empty
+// strings, which reads as a snapshot with no date.
+func TestPriceHistoryNullSnapshotStaysAbsent(t *testing.T) {
+	reply := `{"currency":"EUR","territory":{"selector":"geo_id","geo_id":"R344953","grain":"geo"},
+	 "filters":{"ad_type":"real_estate_residential","ad_sub_type":"buy"},
+	 "series":[],"series_note":"","snapshot":null,
+	 "availability":{"status":"no_data","reason":"period_not_built","message":"Not built yet.",
+	   "searched_from":"2026-09-01","earliest_nonempty_period":null,"latest_nonempty_period":null}}`
+	session, _ := connectFake(t, historyJSON(reply))
+
+	res := callTool(t, session, "price_history", map[string]any{"geo_id": "R344953", "from": "2026-09"})
+	if res.IsError {
+		t.Fatalf("an empty series is a normal answer, got isError: %s", textOf(t, res))
+	}
+	var payload map[string]json.RawMessage
+	structured(t, res, &payload)
+	if snap, has := payload["snapshot"]; has {
+		t.Errorf("snapshot = %s, want it absent", snap)
+	}
+	text := textOf(t, res)
+	mustContain(t, text, "No periods in this range. That is a normal answer")
+	if strings.Contains(text, "snapshot.as_of") || strings.Contains(text, "History goes back to") {
+		t.Errorf("text names a snapshot the server did not send:\n%s", text)
+	}
 }

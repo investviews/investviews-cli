@@ -262,13 +262,34 @@ func DataThisPeriod(hasData *bool, currentPeriod NullableDate) DataSignal {
 	}
 }
 
+// GeoParent is the parent a /geo cascade echoes: which branch the rows are
+// under. It names the place and nothing more.
+//
+// ⚠️ IT IS NOT A GeoResult. The API's parent_ref sends geo_id, name, name_en,
+// level, country and ancestors — no kind, no prices_available, no has_data.
+// Decoded into a GeoResult, the missing fields came back out as kind "" and
+// prices_available false, which an agent reads as "this place has no prices".
+// The parent's own signals are on its row one level up, not here.
+type GeoParent struct {
+	GeoID     string    `json:"geo_id"`
+	Name      string    `json:"name"`
+	NameEn    string    `json:"name_en,omitempty"`
+	Level     string    `json:"level"`
+	Country   string    `json:"country"`
+	Ancestors Ancestors `json:"ancestors"`
+}
+
+// IsCountry reports whether the parent is a country, whose GeoID is the ISO
+// code.
+func (p GeoParent) IsCountry() bool { return p.Level == "country" }
+
 // GeoResponse is /geo. Parent is absent on the country list, so a caller can
 // tell the root from a branch without keeping its own state.
 //
 // ⚠️ It carries NO paging metadata — no total, no has_more, no page echo. That
 // is why offset paging has to run until a short or empty page arrives.
 type GeoResponse struct {
-	Parent  *GeoResult  `json:"parent,omitempty"`
+	Parent  *GeoParent  `json:"parent,omitempty"`
 	Results []GeoResult `json:"results"`
 
 	Meta Meta `json:"-"`
@@ -509,8 +530,10 @@ type Filters struct {
 
 // Snapshot says WHICH period the figures describe.
 type Snapshot struct {
-	// AsOf is the period, as its first day. Not today, and never the period
-	// in progress.
+	// AsOf is the last day of data behind the figures: the window_end of the
+	// period answered. On /stats/history it is the window_end of the NEWEST
+	// period in the range asked, not of every point (each point carries its
+	// own as_of). Not today, and never the period in progress.
 	AsOf           *string `json:"as_of"`
 	Built          string  `json:"built"`
 	EarliestPeriod string  `json:"earliest_period"`
@@ -675,8 +698,11 @@ type HistoryResponse struct {
 
 	Series []HistoryPoint `json:"series"`
 	// SeriesNote restates the non-additivity in every response.
-	SeriesNote string   `json:"series_note"`
-	Snapshot   Snapshot `json:"snapshot"`
+	SeriesNote string `json:"series_note"`
+	// Snapshot is null when the range held no period at all: there is no
+	// newest period to name. A pointer, so that null stays null instead of
+	// coming back out as an object of empty strings.
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
 	// Availability is the verdict for the series as a whole, plus the dates.
 	// nil on a server older than 2026-09-20.
 	Availability *Availability `json:"availability,omitempty"`

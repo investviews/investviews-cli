@@ -200,7 +200,13 @@ func (e *APIError) Hint() string {
 			"coarser --res; with --h3 ask about coarser cells; or name the place with --geo-id, " +
 			"which is answered as one row and chooses no resolution."
 	case CodeUnknownPlace:
-		return "Nothing matched inside a market we serve. Try the did_you_mean suggestions, or browse from investviews geo."
+		// Name the suggestions only when there are some: "try the
+		// did_you_mean suggestions" over an empty list sends the caller
+		// looking for something that is not there.
+		if len(e.DidYouMean) > 0 {
+			return "Nothing matched inside a market we serve. Try the did_you_mean suggestions, or browse from investviews geo."
+		}
+		return "Nothing matched inside a market we serve. Look the place up by name with `investviews geo search`, or browse from investviews geo."
 	case CodeNotCovered:
 		return "We hold no data for that country at all. Retrying never succeeds — pick another market; investviews coverage lists them."
 	case CodeInvalidCursor:

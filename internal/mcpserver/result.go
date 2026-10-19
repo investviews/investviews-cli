@@ -1,7 +1,9 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -45,6 +47,10 @@ func (s *server) client(req *mcp.CallToolRequest) (*api.Client, error) {
 // ok is a successful tool result: payload as structuredContent, text as the
 // one content block, and a cost line when the call spent quota.
 //
+// The cost is in BOTH places: the text line, and a "cost" object added to
+// structuredContent (see withCost). A client that shows only structuredContent
+// to the model would otherwise never see what a call spent.
+//
 // ⚠️ structuredContent IS SET HERE, BY HAND, AND THE HANDLER'S Out IS any.
 // Typed Out structs built from api types make the SDK infer an output schema
 // and validate every result against it — and api.Ancestors, api.NullableDate
@@ -62,8 +68,73 @@ func ok(payload any, text string, meta api.Meta) (*mcp.CallToolResult, any, erro
 	}
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: text}},
-		StructuredContent: payload,
+		StructuredContent: withCost(payload, meta),
 	}, nil, nil
+}
+
+// costInfo is the "cost" object of a successful call's structuredContent:
+// the cost line as fields, from the quota headers.
+//
+// MeteredRequests is 1 or 0 as the SERVER reported it, and null when the
+// response carried no quota headers — unknown, the same rule as costText. It
+// is set on a free call too: in fields, "0, group metadata" is not noise.
+type costInfo struct {
+	MeteredRequests *int   `json:"metered_requests"`
+	Group           string `json:"group,omitempty"`
+	// Limit is a string: a free group sends the word "uncounted".
+	Limit    string `json:"limit,omitempty"`
+	Used     *int64 `json:"used,omitempty"`
+	ResetsAt string `json:"resets_at,omitempty"`
+	// Text is api.Meta.Cost(), the same words the text line uses.
+	Text string `json:"text"`
+}
+
+func newCostInfo(meta api.Meta) costInfo {
+	out := costInfo{Text: meta.Cost()}
+	if !meta.HasQuotaHeaders() {
+		return out
+	}
+	n := 0
+	if meta.Metered() {
+		n = 1
+	}
+	out.MeteredRequests = &n
+	out.Group = meta.QuotaGroup
+	out.Limit = meta.QuotaLimit
+	out.Used = meta.QuotaUsed
+	out.ResetsAt = meta.QuotaReset
+	return out
+}
+
+// withCost is payload with a "cost" key added, as raw JSON.
+//
+// ⚠️ THE PAYLOAD IS MARSHALLED HERE, WITH ITS OWN MarshalJSON, AND THE KEY IS
+// SPLICED INTO THE OBJECT. Wrapping it ({"result": …, "cost": …}) would move
+// every field one level down and break every client that reads them today;
+// decoding it into a map would reorder the fields. A payload that is not a
+// JSON object (none today) is returned as is, without the cost.
+func withCost(payload any, meta api.Meta) any {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return payload
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' {
+		return payload
+	}
+	cost, err := json.Marshal(newCostInfo(meta))
+	if err != nil {
+		return payload
+	}
+	out := make([]byte, 0, len(raw)+len(cost)+10)
+	out = append(out, raw[:len(raw)-1]...)
+	if len(bytes.TrimSpace(raw[1:len(raw)-1])) > 0 {
+		out = append(out, ',')
+	}
+	out = append(out, `"cost":`...)
+	out = append(out, cost...)
+	out = append(out, '}')
+	return json.RawMessage(out)
 }
 
 // costText is the cost line for a tool result, or "" for a free call.
